@@ -5,8 +5,6 @@ import torchvision.transforms as transforms
 import numpy as np
 import os
 
-from typing import List, Tuple
-
 class LircstAnaDataset(Dataset):
     # Our data for our analytical simulation is laid out as such:
     # /data
@@ -20,10 +18,10 @@ class LircstAnaDataset(Dataset):
         self.transform_phan: transforms = transform_phan
         self.transform_sino: transforms = transform_sino
         # Get all the phantom_ids
-        self.phantom_ids: List[str] = os.listdir(data_dir)
+        self.phantom_ids: list[str] = os.listdir(data_dir)
         self.phantom_ids.sort()
         # Iterate over all phantom_id directories and get all slice indices
-        self.idxs: List[Tuple[str, int]] = []
+        self.idxs: list[tuple[str, int]] = []
         for phantom_id in self.phantom_ids:
             phantom_dir = os.path.join(data_dir, phantom_id)
             slice_idxs = [int(f.split('-')[1].split('.')[0]) for f in os.listdir(phantom_dir) if f.startswith('phan-')]
