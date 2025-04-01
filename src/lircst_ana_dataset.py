@@ -31,7 +31,7 @@ class LircstAnaDataset(Dataset):
     def __len__(self) -> int:
         return len(self.idxs)
 
-    def __getitem__(self, idx: int) -> Tuple[np.ndarray, np.ndarray, str]:
+    def __getitem__(self, idx: int) -> tuple[np.ndarray, np.ndarray, str]:
         # Return a tuple of the phantom slice, the sinogram, and the phantom_id (in case we need to look up the metadata)
         phantom_id, slice_idx = self.idxs[idx]
         phantom_dir = os.path.join(self.data_dir, phantom_id)
