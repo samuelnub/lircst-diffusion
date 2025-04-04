@@ -24,7 +24,8 @@ class LircstAnaDataset(Dataset):
         self.idxs: list[tuple[str, int]] = []
         for phantom_id in self.phantom_ids:
             phantom_dir = os.path.join(data_dir, phantom_id)
-            slice_idxs = [int(f.split('-')[1].split('.')[0]) for f in os.listdir(phantom_dir) if f.startswith('phan-')]
+            # P.S Get sinogram count - as it asserts that the phan also exists
+            slice_idxs = [int(f.split('-')[1].split('.')[0]) for f in os.listdir(phantom_dir) if f.startswith('sino-')]
             for idx in slice_idxs:
                 self.idxs.append((phantom_id, idx))
         
@@ -37,11 +38,19 @@ class LircstAnaDataset(Dataset):
         phantom_dir = os.path.join(self.data_dir, phantom_id)
         phan = np.load(os.path.join(phantom_dir, f'phan-{slice_idx}.npy'))
         sino = np.load(os.path.join(phantom_dir, f'sino-{slice_idx}.npy'))
+        
+        # Normalize the phantom and sinogram data to [-1, 1]
+        # This is done by first converting to float32,
+        # Dividing by half of the max value of the tensor, and then subtracting 1
+        phan = phan.astype(np.float32)
+        phan = phan / (np.max(phan) / 2) - 1
+        sino = sino.astype(np.float32)
+        sino = sino / (np.max(sino) / 2) - 1
 
         if self.transform_phan:
             phan = self.transform_phan(phan)
         if self.transform_sino:
             sino = self.transform_sino(sino)
-        
+
         return phan, sino, phantom_id
 

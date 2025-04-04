@@ -4,6 +4,7 @@ from Diffusion.DenoisingDiffusionProcess.samplers.DDIM import DDIM_Sampler
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 
 
@@ -30,13 +31,24 @@ class ECDiffusion(pl.LightningModule):
         return self.model(*args, **kwargs)
     
     def training_step(self, batch, batch_idx):
-        images, condition = batch
-        loss_diffusion = self.model.diffusion_process.p_loss(images, condition)
-        # TODO: loss for conditional encoder? No need! As we concatenate the condition with the input so gradients will backpropagate
+        image, condition, phantom_id = batch
+
+        condition = self.model.conditional_encoder(condition)
+
+        loss = self.model.diffusion_process.p_loss(image, condition)
 
         self.log('train_loss', loss)
         
         return loss
+    
+    def train_dataloader(self):
+        return DataLoader(self.train_dataset,
+                          batch_size=self.batch_size,
+                          shuffle=True,
+                          num_workers=4)
+
+    def configure_optimizers(self):
+        return torch.optim.AdamW(list(filter(lambda p: p.requires_grad, self.model.parameters())), lr=self.lr)
 
 
 class EncodedConditionalDiffusion(nn.Module):
@@ -55,7 +67,7 @@ class EncodedConditionalDiffusion(nn.Module):
 
         self.diffusion_process = DenoisingDiffusionConditionalProcess(
             generated_channels=self.input_output_shape[0],
-            condition_channels=self.condition_shape[self.condition_permute_shape[0]],
+            condition_channels=self.condition_out_shape[0],
             num_timesteps=self.train_timesteps,
             loss_fn=F.mse_loss,
             sampler=DDIM_Sampler(self.sample_timesteps, self.train_timesteps),
@@ -67,8 +79,4 @@ class EncodedConditionalDiffusion(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
-        encoded_condition = self.conditional_encoder(condition)
-        # Concatenate the encoded condition with the input
-        x = torch.cat((x, encoded_condition), dim=1)
-        # Pass through the diffusion process
-        return self.diffusion_process(x)
+        pass

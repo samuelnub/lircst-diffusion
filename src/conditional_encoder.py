@@ -18,14 +18,15 @@ class ConditionalEncoder(nn.Module):
             nn.GELU(),
             nn.Conv2d(32, 16, kernel_size=3, padding=1),
             nn.GELU(),
-            nn.Conv2d(16, self.out_shape[permute_shape[0]], kernel_size=3, padding=1),
+            nn.Conv2d(16, self.out_shape[0], kernel_size=3, padding=1),
             nn.GELU(),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.permute(0, *self.permute_shape)
+        x = x.permute((0, self.permute_shape[0]+1, self.permute_shape[1]+1, self.permute_shape[2]+1))
         x = self.encoder(x)
         # We did not do any pooling in the encoder as spatial dimensions are similar
         # But let's interpolate so they fit exactly to the output shape (F.interpolate takes spatial size as arg)
         x = F.interpolate(x, size=self.out_shape[1:], mode='bilinear', align_corners=False)
+        
         return x
