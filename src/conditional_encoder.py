@@ -30,3 +30,4 @@ class ConditionalEncoder(nn.Module):
         x = F.interpolate(x, size=self.out_shape[1:], mode='bilinear', align_corners=False)
         
         return x
+

@@ -28,13 +28,13 @@ class ECDiffusion(pl.LightningModule):
         )
 
     @torch.no_grad()
-    def forward(self, *args, **kwargs) -> torch.Tensor:
+    def forward(self, *args, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
         condition = args[0]
 
         condition = self.model.conditional_encoder(condition)
         x_t = self.model.diffusion_process(condition, *args[1:], **kwargs)  
 
-        return x_t
+        return x_t, condition
     
     def training_step(self, batch, batch_idx):
         image, condition, phantom_id = batch
