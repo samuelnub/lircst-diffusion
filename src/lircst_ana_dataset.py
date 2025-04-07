@@ -13,10 +13,11 @@ class LircstAnaDataset(Dataset):
     #       /phan-<slice-idx>.npy (contains the slice Ground Truth) (2x128x128)
     #       /sino-<slice-idx>.npy (contains the sinogram of the slice) (128x200x100)
 
-    def __init__(self, data_dir: str, transform_phan: transforms=None, transform_sino: transforms=None):
+    def __init__(self, data_dir: str, transform_phan: transforms=None, transform_sino: transforms=None, scale: bool=True):
         self.data_dir: str = data_dir
         self.transform_phan: transforms = transform_phan
         self.transform_sino: transforms = transform_sino
+        self.scale: bool = scale
         # Get all the phantom_ids
         self.phantom_ids: list[str] = os.listdir(data_dir)
         self.phantom_ids.sort()
@@ -39,13 +40,14 @@ class LircstAnaDataset(Dataset):
         phan = np.load(os.path.join(phantom_dir, f'phan-{slice_idx}.npy'))
         sino = np.load(os.path.join(phantom_dir, f'sino-{slice_idx}.npy'))
         
-        # Normalize the phantom and sinogram data to [-1, 1]
-        # This is done by first converting to float32,
-        # Dividing by half of the max value of the tensor, and then subtracting 1
-        phan = phan.astype(np.float32)
-        phan = phan / (np.max(phan) / 2) - 1
-        sino = sino.astype(np.float32)
-        sino = sino / (np.max(sino) / 2) - 1
+        if self.scale:
+            # Normalize the phantom and sinogram data to [-1, 1]
+            # This is done by first converting to float32,
+            # Dividing by half of the max value of the tensor, and then subtracting 1
+            phan = phan.astype(np.float32)
+            phan = phan / (np.max(phan) / 2) - 1
+            sino = sino.astype(np.float32)
+            sino = sino / (np.max(sino) / 2) - 1
 
         if self.transform_phan:
             phan = self.transform_phan(phan)

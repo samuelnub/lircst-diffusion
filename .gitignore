@@ -1,3 +1,4 @@
 # Ignore files within models directory
 models/*
 data/*
+*.ckpt

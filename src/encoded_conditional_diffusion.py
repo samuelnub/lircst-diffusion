@@ -27,8 +27,14 @@ class ECDiffusion(pl.LightningModule):
             num_timesteps=num_timesteps,
         )
 
-    def forward(self, *args, **kwargs):
-        return self.model(*args, **kwargs)
+    @torch.no_grad()
+    def forward(self, *args, **kwargs) -> torch.Tensor:
+        condition = args[0]
+
+        condition = self.model.conditional_encoder(condition)
+        x_t = self.model.diffusion_process(condition, *args[1:], **kwargs)  
+
+        return x_t
     
     def training_step(self, batch, batch_idx):
         image, condition, phantom_id = batch
@@ -37,7 +43,7 @@ class ECDiffusion(pl.LightningModule):
 
         loss = self.model.diffusion_process.p_loss(image, condition)
 
-        self.log('train_loss', loss)
+        self.log('train_loss', loss, prog_bar=True)
         
         return loss
     
