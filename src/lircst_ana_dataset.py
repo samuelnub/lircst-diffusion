@@ -14,12 +14,11 @@ class LircstAnaDataset(Dataset):
     #       /phan-<slice-idx>.npy (contains the slice Ground Truth) (2x128x128)
     #       /sino-<slice-idx>.npy (contains the sinogram of the slice) (128x200x100)
 
-    def __init__(self, data_dir: str, transform_phan: transforms=None, transform_sino: transforms=None, scale: bool=True, fbp: bool=True):
+    def __init__(self, data_dir: str, transform_phan: transforms=None, transform_sino: transforms=None, scale: bool=True):
         self.data_dir: str = data_dir
         self.transform_phan: transforms = transform_phan
         self.transform_sino: transforms = transform_sino
         self.scale: bool = scale
-        self.fbp: bool = fbp
         # Get all the phantom_ids
         self.phantom_ids: list[str] = os.listdir(data_dir)
         self.phantom_ids.sort()
@@ -41,28 +40,6 @@ class LircstAnaDataset(Dataset):
         phantom_dir = os.path.join(self.data_dir, phantom_id)
         phan = np.load(os.path.join(phantom_dir, f'phan-{slice_idx}.npy'))
         sino = np.load(os.path.join(phantom_dir, f'sino-{slice_idx}.npy'))
-        
-        if self.fbp:
-            # Do filtered back projection on the sinogram
-            # Assume sinogram is of shape (num_projections, num_detectors)
-
-            # TODO: we have 100 bins. Separate them somehow or just sum along that axis
-
-            angles = np.linspace(0, 2*np.pi, sino.shape[1], endpoint=False)
-            proj_geom = astra.create_proj_geom('parallel', 1.0, sino.shape[0], angles) # Technically the second half of our analytical solution is parallel
-            vol_geom = astra.create_vol_geom(sino.shape[0], sino.shape[0])
-            
-            sinogram_id = astra.data2d.create('-sino', proj_geom, sino)
-            rec_id = astra.data2d.create('-vol', vol_geom, 0)
-            cfg = astra.astra_dict('FBP_CUDA')
-            cfg['ReconstructionDataId'] = rec_id
-            cfg['ProjectionDataId'] = sinogram_id
-            alg_id = astra.algorithm.create(cfg)
-            astra.algorithm.run(alg_id)
-            reconstruction = astra.data2d.get(rec_id) # TODO return this 2D array as a 3D array
-            astra.algorithm.delete(alg_id)
-            astra.data2d.delete(rec_id)
-            astra.data2d.delete(sinogram_id)
 
         if self.scale:
             # Normalize the phantom and sinogram data to [-1, 1]

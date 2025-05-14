@@ -11,6 +11,8 @@ class ConditionalEncoder(nn.Module):
         self.in_shape = in_shape
         self.out_shape = out_shape
         self.permute_shape = permute_shape
+
+        # TODO: Unuused as this does not work. We will just use non-DL methods to encode for now.
         self.encoder = nn.Sequential(
             nn.Conv2d(self.in_shape[permute_shape[0]], 64, kernel_size=3, padding=1),
             nn.GELU(),
@@ -24,9 +26,10 @@ class ConditionalEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.permute((0, self.permute_shape[0]+1, self.permute_shape[1]+1, self.permute_shape[2]+1))
-        x = self.encoder(x)
-        # We did not do any pooling in the encoder as spatial dimensions are similar
-        # But let's interpolate so they fit exactly to the output shape (F.interpolate takes spatial size as arg)
+
+        # No deep learning for now
+        x = torch.mean(x, dim=-3, keepdim=True)
+
         x = F.interpolate(x, size=self.out_shape[1:], mode='bilinear', align_corners=False)
         
         return x

@@ -65,7 +65,7 @@ class EncodedConditionalDiffusion(nn.Module):
         super(EncodedConditionalDiffusion, self).__init__()
         self.input_output_shape = input_output_shape
         self.condition_in_shape = condition_in_shape
-        self.condition_out_shape = (8, *self.input_output_shape[1:])
+        self.condition_out_shape = (1, *self.input_output_shape[1:])
         self.condition_permute_shape = (2, 0, 1)
 
         self.train_timesteps = num_timesteps
