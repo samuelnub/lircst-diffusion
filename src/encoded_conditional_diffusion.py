@@ -57,7 +57,7 @@ class ECDiffusion(pl.LightningModule):
         return self.loss_evaluation(batch, batch_idx)
     
     def test_step(self, batch, batch_idx):
-        return self.loss_evaluation(batch, batch_idx, print=True)
+        return self.loss_evaluation(batch, batch_idx, to_print=True)
     
     def train_dataloader(self):
         return DataLoader(self.train_dataset,
@@ -80,7 +80,7 @@ class ECDiffusion(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.AdamW(list(filter(lambda p: p.requires_grad, self.model.parameters())), lr=self.lr)
 
-    def loss_evaluation(self, batch, batch_idx, print=False):
+    def loss_evaluation(self, batch, batch_idx, to_print=False):
         image, condition, phantom_id = batch
 
         condition = self.model.conditional_encoder(condition)
@@ -109,7 +109,7 @@ class ECDiffusion(pl.LightningModule):
         self.log('psnr', psnr, prog_bar=True, on_step=False, on_epoch=True)
         self.log('ssim', ssim, prog_bar=True, on_step=False, on_epoch=True)
         
-        if print:
+        if to_print:
             print(f'Batch {batch_idx}: PSNR: {psnr:.4f}, SSIM: {ssim:.4f}')
 
         return psnr, ssim
