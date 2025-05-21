@@ -6,18 +6,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
+import numpy as np
+
+from skimage.metrics import peak_signal_noise_ratio as PeakSignalNoiseRatio
+from skimage.metrics import structural_similarity as StructuralSimilarity
 
 
 class ECLDiffusion(pl.LightningModule):
     def __init__(self,
                  train_dataset,
                  valid_dataset=None,
+                 test_dataset=None,
                  num_timesteps=1000,
                  batch_size=1,
                  lr=1e-4):
         super().__init__()
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
+        self.test_dataset = test_dataset
         self.lr = lr
         self.batch_size = batch_size
 
@@ -35,6 +41,11 @@ class ECLDiffusion(pl.LightningModule):
         condition = args[0]
 
         condition = self.model.conditional_encoder(condition)
+
+        condition = condition.repeat(1, 3, 1, 1)
+        # For some reason interpolate doesnt work in the encoder
+        condition = F.interpolate(condition, size=(256, 256), mode='bilinear', align_corners=False)
+
         x_t = self.model.diffusion_process(condition, *args[1:], **kwargs)  
 
         return x_t, condition
@@ -57,14 +68,66 @@ class ECLDiffusion(pl.LightningModule):
         
         return loss
     
+    def validation_step(self, batch, batch_idx):
+        return self.loss_evaluation(batch, batch_idx)
+    
+    def test_step(self, batch, batch_idx):
+        return self.loss_evaluation(batch, batch_idx, print=True)
+    
     def train_dataloader(self):
         return DataLoader(self.train_dataset,
                           batch_size=self.batch_size,
                           shuffle=True,
                           num_workers=4)
+    
+    def val_dataloader(self):
+        return DataLoader(self.valid_dataset,
+                          batch_size=self.batch_size,
+                          shuffle=False,
+                          num_workers=4)
+    
+    def test_dataloader(self):
+        return DataLoader(self.test_dataset,
+                          batch_size=self.batch_size,
+                          shuffle=False,
+                          num_workers=4)
 
     def configure_optimizers(self):
         return torch.optim.AdamW(list(filter(lambda p: p.requires_grad, self.model.parameters())), lr=self.lr)
+
+    def loss_evaluation(self, batch, batch_idx, print=False):
+        image, condition, phantom_id = batch
+
+        condition = self.model.conditional_encoder(condition)
+
+        pred, _ = self.forward(condition)
+
+        # Calculate PSNR and SSIM
+        # If dimensions are not the same, resize the prediction to match the image
+        if pred.shape != image.shape:
+            pred = F.interpolate(pred, size=image.shape[2:], mode='bilinear', align_corners=False)
+
+        data_range: float = 2.0 # [-1, 1]
+
+        psnr: float = 0
+        ssim: float = 0
+
+        # As we have to do this with skimage, we need to convert the tensors to numpy arrays and iterate over the batch
+        # This is not the most efficient way, but it works
+        for i in range(self.batch_size):
+            pred_np = pred[i].cpu().numpy().astype(np.float32)
+            image_np = image[i].cpu().numpy().astype(np.float32)
+
+            psnr += PeakSignalNoiseRatio(pred_np, image_np, data_range=data_range) / self.batch_size
+            ssim += StructuralSimilarity(pred_np, image_np, multichannel=True, channel_axis=0, data_range=2.0) / self.batch_size
+
+        self.log('psnr', psnr, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('ssim', ssim, prog_bar=True, on_step=False, on_epoch=True)
+        
+        if print:
+            print(f'Batch {batch_idx}: PSNR: {psnr:.4f}, SSIM: {ssim:.4f}')
+
+        return psnr, ssim
 
 
 class EncodedConditionalLatentDiffusion(nn.Module):
