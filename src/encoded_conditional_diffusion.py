@@ -62,7 +62,7 @@ class ECDiffusion(pl.LightningModule):
         return self.loss_evaluation(batch, batch_idx)
     
     def test_step(self, batch, batch_idx):
-        return self.loss_evaluation(batch, batch_idx, to_print=True)
+        return self.loss_evaluation(batch, batch_idx)
     
     def train_dataloader(self):
         return DataLoader(self.train_dataset,

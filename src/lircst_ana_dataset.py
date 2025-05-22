@@ -41,11 +41,6 @@ class LircstAnaDataset(Dataset):
         phan = np.load(os.path.join(phantom_dir, f'phan-{slice_idx}.npy'))
         sino = np.load(os.path.join(phantom_dir, f'sino-{slice_idx}.npy'))
 
-        print(f'Phantom {phantom_id} slice {slice_idx} - phan[0] range: {np.min(phan[0])} - {np.max(phan[0])}')
-        print(f'Phantom {phantom_id} slice {slice_idx} - phan[1] range: {np.min(phan[1])} - {np.max(phan[1])}')
-        print(f'Phantom {phantom_id} slice {slice_idx} - sino range: {np.min(sino)} - {np.max(sino)}')
-
-
         if self.scale:
             # Normalize the phantom and sinogram data to [-1, 1]
             # This is done by first converting to float32,
@@ -55,11 +50,6 @@ class LircstAnaDataset(Dataset):
             phan[1] = phan[1] / (np.max(phan[1]) / 2) - 1
             sino = sino.astype(np.float32)
             sino = sino / (np.max(sino) / 2) - 1
-
-        # print ranges of the data
-        print(f'Phantom {phantom_id} slice {slice_idx} - phan[0] range: {np.min(phan[0])} - {np.max(phan[0])}')
-        print(f'Phantom {phantom_id} slice {slice_idx} - phan[1] range: {np.min(phan[1])} - {np.max(phan[1])}')
-        print(f'Phantom {phantom_id} slice {slice_idx} - sino range: {np.min(sino)} - {np.max(sino)}')
 
         if self.transform_phan:
             phan = self.transform_phan(phan)

@@ -13,6 +13,7 @@ class ConditionalEncoder(nn.Module):
         self.permute_shape = permute_shape
 
         # TODO: Unuused as this does not work. We will just use non-DL methods to encode for now.
+        #'''
         self.encoder = nn.Sequential(
             nn.Conv2d(self.in_shape[permute_shape[0]], 64, kernel_size=3, padding=1),
             nn.GELU(),
@@ -23,6 +24,7 @@ class ConditionalEncoder(nn.Module):
             nn.Conv2d(16, self.out_shape[0], kernel_size=3, padding=1),
             nn.GELU(),
         )
+        #'''
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.permute((0, self.permute_shape[0]+1, self.permute_shape[1]+1, self.permute_shape[2]+1))
