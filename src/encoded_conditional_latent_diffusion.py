@@ -8,6 +8,8 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 import numpy as np
 
+from sampler_wrapper import SamplerWrapper
+
 from skimage.metrics import peak_signal_noise_ratio as PeakSignalNoiseRatio
 from skimage.metrics import structural_similarity as StructuralSimilarity
 
@@ -36,6 +38,9 @@ class ECLDiffusion(pl.LightningModule):
             valid_dataset=self.valid_dataset,
         )
 
+        self.sampler_wrapper = SamplerWrapper(sample_timesteps=self.model.sample_timesteps,
+                                              train_timesteps=self.model.train_timesteps)
+
     @torch.no_grad()
     def forward(self, *args, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
         condition = args[0]
@@ -46,7 +51,7 @@ class ECLDiffusion(pl.LightningModule):
         # For some reason interpolate doesnt work in the encoder
         condition = F.interpolate(condition, size=(256, 256), mode='bilinear', align_corners=False)
 
-        x_t = self.model.diffusion_process(condition, *args[1:], **kwargs)  
+        x_t = self.model.diffusion_process(condition, self.sampler_wrapper.get_sampler(), *args[2:], **kwargs)  
 
         return x_t, condition
     
@@ -112,25 +117,34 @@ class ECLDiffusion(pl.LightningModule):
 
         data_range: float = 2.0 # [-1, 1]
 
-        psnr: float = 0
-        ssim: float = 0
+        psnr_scat: float = 0
+        ssim_scat: float = 0
+
+        psnr_atten: float = 0
+        ssim_atten: float = 0
 
         # As we have to do this with skimage, we need to convert the tensors to numpy arrays and iterate over the batch
         # This is not the most efficient way, but it works
-        for i in range(self.batch_size):
+        for i in range(image.shape[0]):
             pred_np = pred[i].cpu().numpy().astype(np.float32)
             image_np = image[i].cpu().numpy().astype(np.float32)
 
-            psnr += PeakSignalNoiseRatio(pred_np, image_np, data_range=data_range) / self.batch_size
-            ssim += StructuralSimilarity(pred_np, image_np, multichannel=True, channel_axis=0, data_range=2.0) / self.batch_size
+            psnr_scat += PeakSignalNoiseRatio(pred_np[0], image_np[0], data_range=data_range) / image.shape[0]
+            ssim_scat += StructuralSimilarity(pred_np[0], image_np[0], data_range=data_range) / image.shape[0]
 
-        self.log('psnr', psnr, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('ssim', ssim, prog_bar=True, on_step=False, on_epoch=True)
+            psnr_atten += PeakSignalNoiseRatio(pred_np[1], image_np[1], data_range=data_range) / image.shape[0]
+            ssim_atten += StructuralSimilarity(pred_np[1], image_np[1], data_range=data_range) / image.shape[0]
+
+        self.log('psnr_scat', psnr_scat, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('ssim_scat', ssim_scat, prog_bar=True, on_step=False, on_epoch=True)
+
+        self.log('psnr_atten', psnr_atten, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('ssim_atten', ssim_atten, prog_bar=True, on_step=False, on_epoch=True)
         
         if to_print:
-            print(f'Batch {batch_idx}: PSNR: {psnr:.4f}, SSIM: {ssim:.4f}')
+            print(f'Batch {batch_idx}: PSNR_scat: {psnr_scat:.4f}, SSIM_scat: {ssim_scat:.4f} | PSNR_atten: {psnr_atten:.4f}, SSIM_atten: {ssim_atten:.4f}')
 
-        return psnr, ssim
+        return psnr_scat, ssim_scat, psnr_atten, ssim_atten
 
 
 class EncodedConditionalLatentDiffusion(nn.Module):
@@ -150,8 +164,8 @@ class EncodedConditionalLatentDiffusion(nn.Module):
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
 
-        self.train_timesteps = num_timesteps
         self.sample_timesteps = num_timesteps // 5
+        self.train_timesteps = num_timesteps
 
         self.diffusion_process = LatentDiffusionConditional(
             num_timesteps=self.train_timesteps,
