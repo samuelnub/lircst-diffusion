@@ -62,7 +62,7 @@ class LircstAnaDataset(Dataset):
             min_sino = np.min(sino)
             max_sino = np.max(sino)
 
-            if not nonzero_max_phan0 == nonzero_min_phan0:
+            if False: # TODO not nonzero_max_phan0 == nonzero_min_phan0:
                 phan[0][nonzero_phan0] = (phan[0][nonzero_phan0] - nonzero_min_phan0) / (nonzero_max_phan0 - nonzero_min_phan0)
                 phan[0][np.where(phan[0] == 0.0)] = -1.0
             else:
