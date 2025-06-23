@@ -16,6 +16,10 @@ class PhysicsIncorporated(nn.Module):
 
     def forward(self, x_t: torch.Tensor, noise_hat: torch.Tensor, t):
         # Apply forward operator to our predicted x_0 based on x_t and noise_hat
+
+        # https://github.com/Stability-AI/stablediffusion/blob/main/ldm/models/diffusion/ddim.py#L236
+        # Is the extract method even needed here?
+
         pass
 
 def extract(a, t, x_shape):
