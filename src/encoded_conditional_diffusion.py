@@ -9,6 +9,7 @@ import pytorch_lightning as pl
 import numpy as np
 
 from sampler_wrapper import SamplerWrapper
+from physics_inc import PhysicsIncorporated
 
 from skimage.metrics import peak_signal_noise_ratio as PeakSignalNoiseRatio
 from skimage.metrics import structural_similarity as StructuralSimilarity
@@ -21,7 +22,8 @@ class ECDiffusion(pl.LightningModule):
                  test_dataset=None,
                  num_timesteps=1000,
                  batch_size=1,
-                 lr=1e-4):
+                 lr=1e-4,
+                 physics=False):
         super().__init__()
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
@@ -38,6 +40,62 @@ class ECDiffusion(pl.LightningModule):
         self.sampler_wrapper = SamplerWrapper(sample_timesteps=self.model.sample_timesteps,
                                              train_timesteps=self.model.train_timesteps)
 
+        self.physics_model: PhysicsIncorporated | None = PhysicsIncorporated(
+            gaussian_forward_process=self.model.diffusion_process.forward_process,
+            A_ut_dir='/home/samnub/dev/lircst-iterecon/data_discretised/A_ut.npy',
+        ) if physics else None
+
+    def preprocess(self, image: torch.Tensor, condition: torch.Tensor):
+        # Pre-process our phantom images and conditions (no need for a separate conditional encoder here)
+
+        image_out: torch.Tensor = torch.zeros((
+            image.shape[0], # batch size
+            image.shape[1], # 2 channels: scatter and attenuation,
+            image.shape[2], # height
+            image.shape[3], # width
+        )).cuda()
+        condition_out: torch.Tensor = torch.zeros((
+            condition.shape[0], # batch size
+            1, # 1 channel: sinogram
+            image.shape[2], # height
+            image.shape[3], # width
+        )).cuda()
+
+        for i in range(image.shape[0]):
+            phan = image[i]
+            sino = condition[i]
+
+            sino = sino.sum(dim=-1, keepdim=True)
+            sino = sino.permute(2, 0, 1)  # Change to (C, H, W) format
+            sino = F.interpolate(sino.unsqueeze(0), size=phan.shape[1:], mode='bilinear', align_corners=False).squeeze(0)
+
+            nonzero_phan0 = torch.nonzero(phan[0])
+
+            nonzero_min_phan0 = torch.min(phan[0][nonzero_phan0])
+            nonzero_max_phan0 = torch.max(phan[0][nonzero_phan0])
+
+            min_phan1 = torch.min(phan[1])
+            max_phan1 = torch.max(phan[1])
+
+            min_sino = torch.min(sino)
+            max_sino = torch.max(sino)
+
+            if False: # TODO not nonzero_max_phan0 == nonzero_min_phan0:
+                phan[0][nonzero_phan0] = (phan[0][nonzero_phan0] - nonzero_min_phan0) / (nonzero_max_phan0 - nonzero_min_phan0)
+                phan[0][torch.where(phan[0] == 0.0)] = -1.0
+            else:
+                min_phan0 = torch.min(phan[0])
+                max_phan0 = torch.max(phan[0])
+                phan[0] = ((phan[0] - min_phan0) / (max_phan0 - min_phan0)) * 2 - 1
+
+            phan[1] = ((phan[1] - min_phan1) / (max_phan1 - min_phan1)) * 2 - 1
+            sino = ((sino - min_sino) / (max_sino - min_sino)) * 2 - 1
+
+            image_out[i] = phan
+            condition_out[i] = sino
+
+        return image_out, condition_out
+
     @torch.no_grad()
     def forward(self, *args, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
         condition = args[0]
@@ -50,9 +108,18 @@ class ECDiffusion(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         image, condition, phantom_id = batch
 
-        condition = self.model.conditional_encoder(condition)
+        image, condition = self.preprocess(image, condition)
 
-        loss = self.model.diffusion_process.p_loss(image, condition)
+        print(f'Batch {batch_idx}: Image shape: {image.shape}, Condition shape: {condition.shape}')
+
+        #condition = self.model.conditional_encoder(condition)
+
+        loss, x_t, noise_hat, t = self.model.diffusion_process.p_loss(image, condition)
+
+        if self.physics_model is not None:
+            # Apply physics model to the loss
+            physics_loss = self.physics_model(x_t, noise_hat, t, condition)
+            loss += physics_loss
 
         self.log('train_loss', loss, prog_bar=True)
         
@@ -95,7 +162,7 @@ class ECDiffusion(pl.LightningModule):
         # Calculate PSNR and SSIM
         # If dimensions are not the same, resize the prediction to match the image
         if pred.shape != image.shape:
-            pred = F.interpolate(pred, size=image.shape[2:], mode='bilinear', align_corners=False)
+            pred = F.interpolate(pred, size=image.shape[-1], mode='bilinear', align_corners=False)
 
         data_range: float = 2.0 # [-1, 1]
 

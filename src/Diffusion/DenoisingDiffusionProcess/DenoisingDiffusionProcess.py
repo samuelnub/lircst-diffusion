@@ -186,4 +186,4 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
         noise_hat = self.model(model_input, t) 
             
         # apply loss
-        return self.loss_fn(noise, noise_hat)
+        return self.loss_fn(noise, noise_hat), output_noisy, noise_hat, t # ADDED: return noisy output and noise prediction and timestep for our physics model
