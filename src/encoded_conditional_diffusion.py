@@ -31,6 +31,8 @@ class ECDiffusion(pl.LightningModule):
         self.lr = lr
         self.batch_size = batch_size
 
+        self.image_shape = (2, 128, 128)  # 2 channels: scatter and attenuation
+
         self.model = EncodedConditionalDiffusion(
             input_output_shape=(2, 128, 128),
             condition_in_shape=(128, 200, 100),
@@ -45,54 +47,59 @@ class ECDiffusion(pl.LightningModule):
             A_ut_dir='/home/samnub/dev/lircst-iterecon/data_discretised/A_ut.npy',
         ) if physics else None
 
-    def preprocess(self, image: torch.Tensor, condition: torch.Tensor):
+    def preprocess(self, image: torch.Tensor | None=None, condition: torch.Tensor | None=None):
         # Pre-process our phantom images and conditions (no need for a separate conditional encoder here)
 
-        image_out: torch.Tensor = torch.zeros((
+        image_out: torch.Tensor | None = None if image is None else torch.zeros((
             image.shape[0], # batch size
             image.shape[1], # 2 channels: scatter and attenuation,
             image.shape[2], # height
             image.shape[3], # width
         )).cuda()
-        condition_out: torch.Tensor = torch.zeros((
+        condition_out: torch.Tensor | None = None if condition is None else torch.zeros((
             condition.shape[0], # batch size
             1, # 1 channel: sinogram
-            image.shape[2], # height
-            image.shape[3], # width
+            self.image_shape[-2], # height
+            self.image_shape[-1], # width
         )).cuda()
 
-        for i in range(image.shape[0]):
-            phan = image[i]
-            sino = condition[i]
+        b: int = image.shape[0] if image is not None else condition.shape[0]
 
-            sino = sino.sum(dim=-1, keepdim=True)
-            sino = sino.permute(2, 0, 1)  # Change to (C, H, W) format
-            sino = F.interpolate(sino.unsqueeze(0), size=phan.shape[1:], mode='bilinear', align_corners=False).squeeze(0)
+        for i in range(b):
+            phan = image[i] if image is not None else None
+            sino = condition[i] if condition is not None else None
 
-            nonzero_phan0 = torch.nonzero(phan[0])
+            if phan is not None:
+                nonzero_phan0 = torch.nonzero(phan[0])
+                nonzero_min_phan0 = torch.min(phan[0][nonzero_phan0])
+                nonzero_max_phan0 = torch.max(phan[0][nonzero_phan0])
 
-            nonzero_min_phan0 = torch.min(phan[0][nonzero_phan0])
-            nonzero_max_phan0 = torch.max(phan[0][nonzero_phan0])
+                min_phan1 = torch.min(phan[1])
+                max_phan1 = torch.max(phan[1])
 
-            min_phan1 = torch.min(phan[1])
-            max_phan1 = torch.max(phan[1])
+                if False: # TODO not nonzero_max_phan0 == nonzero_min_phan0:
+                    phan[0][nonzero_phan0] = (phan[0][nonzero_phan0] - nonzero_min_phan0) / (nonzero_max_phan0 - nonzero_min_phan0)
+                    phan[0][torch.where(phan[0] == 0.0)] = -1.0
+                else:
+                    min_phan0 = torch.min(phan[0])
+                    max_phan0 = torch.max(phan[0])
+                    phan[0] = ((phan[0] - min_phan0) / (max_phan0 - min_phan0)) * 2 - 1
 
-            min_sino = torch.min(sino)
-            max_sino = torch.max(sino)
+                phan[1] = ((phan[1] - min_phan1) / (max_phan1 - min_phan1)) * 2 - 1
+            
+            if sino is not None:
+                min_sino = torch.min(sino)
+                max_sino = torch.max(sino)
 
-            if False: # TODO not nonzero_max_phan0 == nonzero_min_phan0:
-                phan[0][nonzero_phan0] = (phan[0][nonzero_phan0] - nonzero_min_phan0) / (nonzero_max_phan0 - nonzero_min_phan0)
-                phan[0][torch.where(phan[0] == 0.0)] = -1.0
-            else:
-                min_phan0 = torch.min(phan[0])
-                max_phan0 = torch.max(phan[0])
-                phan[0] = ((phan[0] - min_phan0) / (max_phan0 - min_phan0)) * 2 - 1
+                sino = sino.sum(dim=-1, keepdim=True)
+                sino = sino.permute(2, 0, 1)  # Change to (C, H, W) format
+                sino = F.interpolate(sino.unsqueeze(0), size=self.image_shape[-2:], mode='bilinear', align_corners=False).squeeze(0)
+                sino = ((sino - min_sino) / (max_sino - min_sino)) * 2 - 1
 
-            phan[1] = ((phan[1] - min_phan1) / (max_phan1 - min_phan1)) * 2 - 1
-            sino = ((sino - min_sino) / (max_sino - min_sino)) * 2 - 1
-
-            image_out[i] = phan
-            condition_out[i] = sino
+            if image_out is not None:
+                image_out[i] = phan
+            if condition_out is not None:
+                condition_out[i] = sino
 
         return image_out, condition_out
 
@@ -100,7 +107,7 @@ class ECDiffusion(pl.LightningModule):
     def forward(self, *args, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
         condition = args[0]
 
-        condition = self.model.conditional_encoder(condition)
+        _, condition = self.preprocess(condition=condition)
         x_t = self.model.diffusion_process(condition, self.sampler_wrapper.get_sampler(), *args[2:], **kwargs)  
 
         return x_t, condition
@@ -108,18 +115,14 @@ class ECDiffusion(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         image, condition, phantom_id = batch
 
-        image, condition = self.preprocess(image, condition)
-
-        print(f'Batch {batch_idx}: Image shape: {image.shape}, Condition shape: {condition.shape}')
-
-        #condition = self.model.conditional_encoder(condition)
+        image, condition = self.preprocess(image=image, condition=condition)
 
         loss, x_t, noise_hat, t = self.model.diffusion_process.p_loss(image, condition)
 
         if self.physics_model is not None:
             # Apply physics model to the loss
             physics_loss = self.physics_model(x_t, noise_hat, t, condition)
-            loss += physics_loss
+            loss += physics_loss * 0.3 # Adjust the weight as needed
 
         self.log('train_loss', loss, prog_bar=True)
         
@@ -155,7 +158,7 @@ class ECDiffusion(pl.LightningModule):
     def loss_evaluation(self, batch, batch_idx, to_print=False):
         image, condition, phantom_id = batch
 
-        condition = self.model.conditional_encoder(condition)
+        image, condition = self.preprocess(image=image, condition=condition)
 
         pred, _ = self.forward(condition)
 
@@ -203,9 +206,7 @@ class EncodedConditionalDiffusion(nn.Module):
                  num_timesteps: int = 1000,):
         super(EncodedConditionalDiffusion, self).__init__()
         self.input_output_shape = input_output_shape
-        self.condition_in_shape = condition_in_shape
         self.condition_out_shape = (1, *self.input_output_shape[1:])
-        self.condition_permute_shape = (2, 0, 1)
 
         self.sample_timesteps = num_timesteps // 5
         self.train_timesteps = num_timesteps
@@ -215,11 +216,6 @@ class EncodedConditionalDiffusion(nn.Module):
             condition_channels=self.condition_out_shape[0],
             num_timesteps=self.train_timesteps,
             loss_fn=F.mse_loss,
-        )
-        self.conditional_encoder = ConditionalEncoder(
-            in_shape=self.condition_in_shape,
-            out_shape=self.condition_out_shape,
-            permute_shape=self.condition_permute_shape,
         )
 
     def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
