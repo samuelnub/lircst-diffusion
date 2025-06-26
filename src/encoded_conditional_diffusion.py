@@ -1,5 +1,5 @@
 from Diffusion.DenoisingDiffusionProcess import DenoisingDiffusionConditionalProcess
-from conditional_encoder import ConditionalEncoder
+from Diffusion.LatentDiffusion import LatentDiffusionConditional
 from Diffusion.DenoisingDiffusionProcess.samplers.DDIM import DDIM_Sampler
 import torch
 import torch.nn as nn
@@ -21,29 +21,34 @@ class ECDiffusion(pl.LightningModule):
                  valid_dataset=None,
                  test_dataset=None,
                  num_timesteps=1000,
-                 batch_size=1,
+                 batch_size=16,
                  lr=1e-4,
-                 physics=False):
+                 physics=False,
+                 latent=False):
         super().__init__()
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
         self.test_dataset = test_dataset
         self.lr = lr
         self.batch_size = batch_size
+        self.latent = latent
 
-        self.image_shape = (2, 128, 128)  # 2 channels: scatter and attenuation
+        self.image_shape = (2, 128, 128) if not self.latent else (3, 256, 256)  # 2 channels: scatter and attenuation
 
         self.model = EncodedConditionalDiffusion(
-            input_output_shape=(2, 128, 128),
-            condition_in_shape=(128, 200, 100),
+            input_output_shape=self.image_shape,
             num_timesteps=num_timesteps,
+            batch_size=self.batch_size,
+            train_dataset=self.train_dataset,
+            valid_dataset=self.valid_dataset,
+            latent=self.latent,
         )
 
         self.sampler_wrapper = SamplerWrapper(sample_timesteps=self.model.sample_timesteps,
                                              train_timesteps=self.model.train_timesteps)
 
         self.physics_model: PhysicsIncorporated | None = PhysicsIncorporated(
-            gaussian_forward_process=self.model.diffusion_process.forward_process,
+            gaussian_forward_process=self.model.diffusion_process.forward_process if not self.latent else self.model.diffusion_process.model.forward_process,
             A_ut_dir='/home/samnub/dev/lircst-iterecon/data_discretised/A_ut.npy',
         ) if physics else None
 
@@ -52,13 +57,13 @@ class ECDiffusion(pl.LightningModule):
 
         image_out: torch.Tensor | None = None if image is None else torch.zeros((
             image.shape[0], # batch size
-            image.shape[1], # 2 channels: scatter and attenuation,
-            image.shape[2], # height
-            image.shape[3], # width
+            self.image_shape[-3], # 2 channels: scatter and attenuation (3 if latent)
+            self.image_shape[-2], # height
+            self.image_shape[-1], # width
         )).cuda()
         condition_out: torch.Tensor | None = None if condition is None else torch.zeros((
             condition.shape[0], # batch size
-            1, # 1 channel: sinogram
+            1 if not self.latent else self.image_shape[-3], # 1 channel: sinogram (3 if latent)
             self.image_shape[-2], # height
             self.image_shape[-1], # width
         )).cuda()
@@ -70,23 +75,18 @@ class ECDiffusion(pl.LightningModule):
             sino = condition[i] if condition is not None else None
 
             if phan is not None:
-                nonzero_phan0 = torch.nonzero(phan[0])
-                nonzero_min_phan0 = torch.min(phan[0][nonzero_phan0])
-                nonzero_max_phan0 = torch.max(phan[0][nonzero_phan0])
-
                 min_phan1 = torch.min(phan[1])
                 max_phan1 = torch.max(phan[1])
-
-                if False: # TODO not nonzero_max_phan0 == nonzero_min_phan0:
-                    phan[0][nonzero_phan0] = (phan[0][nonzero_phan0] - nonzero_min_phan0) / (nonzero_max_phan0 - nonzero_min_phan0)
-                    phan[0][torch.where(phan[0] == 0.0)] = -1.0
-                else:
-                    min_phan0 = torch.min(phan[0])
-                    max_phan0 = torch.max(phan[0])
-                    phan[0] = ((phan[0] - min_phan0) / (max_phan0 - min_phan0)) * 2 - 1
-
+                min_phan0 = torch.min(phan[0])
+                max_phan0 = torch.max(phan[0])
+                phan[0] = ((phan[0] - min_phan0) / (max_phan0 - min_phan0)) * 2 - 1
                 phan[1] = ((phan[1] - min_phan1) / (max_phan1 - min_phan1)) * 2 - 1
-            
+
+                if self.latent:
+                    sandwich = torch.mean(phan, dim=0, keepdim=True)  # Create a sandwich channel
+                    phan = torch.cat((phan[0].unsqueeze(0), sandwich, phan[1].unsqueeze(0)), dim=0)  # Concatenate the sandwich channel
+                    phan = F.interpolate(phan.unsqueeze(0), size=self.image_shape[-2:], mode='bilinear', align_corners=False).squeeze(0)
+
             if sino is not None:
                 min_sino = torch.min(sino)
                 max_sino = torch.max(sino)
@@ -95,6 +95,9 @@ class ECDiffusion(pl.LightningModule):
                 sino = sino.permute(2, 0, 1)  # Change to (C, H, W) format
                 sino = F.interpolate(sino.unsqueeze(0), size=self.image_shape[-2:], mode='bilinear', align_corners=False).squeeze(0)
                 sino = ((sino - min_sino) / (max_sino - min_sino)) * 2 - 1
+
+                if self.latent:
+                    sino = sino.repeat(self.image_shape[-3], 1, 1) # Needs 3 channels
 
             if image_out is not None:
                 image_out[i] = phan
@@ -117,20 +120,28 @@ class ECDiffusion(pl.LightningModule):
 
         image, condition = self.preprocess(image=image, condition=condition)
 
-        loss, x_t, noise_hat, t = self.model.diffusion_process.p_loss(image, condition)
+        loss: torch.Tensor | None = None
+        x_t: torch.Tensor | None = None
+        noise_hat: torch.Tensor | None = None
+        t: torch.Tensor | None = None
+
+        if not self.latent:
+            loss, x_t, noise_hat, t = self.model.diffusion_process.p_loss(image, condition)
+        else:
+            loss, x_t, noise_hat, t = self.model.diffusion_process.training_step((condition, image), batch_idx=batch_idx)
 
         if self.physics_model is not None:
             # Apply physics model to the loss
             physics_loss = self.physics_model(x_t, noise_hat, t, condition)
-            loss += physics_loss * 0.3 # Adjust the weight as needed
+            loss += physics_loss * 0.5 # Adjust the weight as needed
 
         self.log('train_loss', loss, prog_bar=True)
         
         return loss
-    
+    '''
     def validation_step(self, batch, batch_idx):
         return self.loss_evaluation(batch, batch_idx)
-    
+    '''
     def test_step(self, batch, batch_idx):
         return self.loss_evaluation(batch, batch_idx)
     
@@ -139,13 +150,13 @@ class ECDiffusion(pl.LightningModule):
                           batch_size=self.batch_size,
                           shuffle=True,
                           num_workers=4)
-    
+    '''
     def val_dataloader(self):
         return DataLoader(self.valid_dataset,
                           batch_size=self.batch_size,
                           shuffle=False,
                           num_workers=4)
-    
+    '''
     def test_dataloader(self):
         return DataLoader(self.test_dataset,
                           batch_size=self.batch_size,
@@ -184,8 +195,8 @@ class ECDiffusion(pl.LightningModule):
             psnr_scat += PeakSignalNoiseRatio(pred_np[0], image_np[0], data_range=data_range) / image.shape[0]
             ssim_scat += StructuralSimilarity(pred_np[0], image_np[0], data_range=data_range) / image.shape[0]
 
-            psnr_atten += PeakSignalNoiseRatio(pred_np[1], image_np[1], data_range=data_range) / image.shape[0]
-            ssim_atten += StructuralSimilarity(pred_np[1], image_np[1], data_range=data_range) / image.shape[0]
+            psnr_atten += PeakSignalNoiseRatio(pred_np[-1], image_np[-1], data_range=data_range) / image.shape[0]
+            ssim_atten += StructuralSimilarity(pred_np[-1], image_np[-1], data_range=data_range) / image.shape[0]
 
         self.log('psnr_scat', psnr_scat, prog_bar=True, on_step=False, on_epoch=True)
         self.log('ssim_scat', ssim_scat, prog_bar=True, on_step=False, on_epoch=True)
@@ -202,20 +213,34 @@ class ECDiffusion(pl.LightningModule):
 class EncodedConditionalDiffusion(nn.Module):
     def __init__(self,
                  input_output_shape: tuple = (2, 128, 128),
-                 condition_in_shape: tuple = (128, 200, 100),
-                 num_timesteps: int = 1000,):
+                 num_timesteps: int = 1000,
+                 batch_size: int = 16,
+                 train_dataset=None,
+                 valid_dataset=None,
+                 latent: bool = False):
         super(EncodedConditionalDiffusion, self).__init__()
         self.input_output_shape = input_output_shape
         self.condition_out_shape = (1, *self.input_output_shape[1:])
 
+        self.batch_size = batch_size
+        self.train_dataset = train_dataset
+        self.valid_dataset = valid_dataset
+
         self.sample_timesteps = num_timesteps // 5
         self.train_timesteps = num_timesteps
+
+        self.latent = latent
 
         self.diffusion_process = DenoisingDiffusionConditionalProcess(
             generated_channels=self.input_output_shape[0],
             condition_channels=self.condition_out_shape[0],
             num_timesteps=self.train_timesteps,
             loss_fn=F.mse_loss,
+        ) if not self.latent else LatentDiffusionConditional(
+            num_timesteps=self.train_timesteps,
+            batch_size=self.batch_size,
+            train_dataset=self.train_dataset,
+            valid_dataset=self.valid_dataset,
         )
 
     def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:

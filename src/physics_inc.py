@@ -25,6 +25,8 @@ class PhysicsIncorporated(nn.Module):
 
         self.loss_metric = SSIM(data_range=1.0, size_average=True, channel=1).cuda()  # Assuming single channel for sinogram
 
+        self.image_width = 128
+
         # Load the forward operator matrices from the specified directory
         if A_ut_dir is not None:
             self.A_ut = torch.from_numpy(np.load(A_ut_dir)).float().cuda()
@@ -33,13 +35,20 @@ class PhysicsIncorporated(nn.Module):
         if A_tb_dir is not None:
             self.A_tb = torch.from_numpy(np.load(A_tb_dir)).float().cuda()
 
-
     def forward(self, x_t: torch.Tensor, noise_hat: torch.Tensor, t, y: torch.Tensor) -> torch.Tensor:
         # Apply forward operator to our predicted x_0 based on x_t and noise_hat, and calculate loss between the predicted and actual y.
 
         # Stochastic sampling
         indices = torch.randperm(x_t.shape[0])[:math.floor(x_t.shape[0] * self.stochastic_proportion)]
         loss_total = 0.0
+
+        if x_t.shape[-1] != self.image_width:
+            x_t = F.interpolate(x_t, size=(self.image_width, self.image_width), mode='bilinear', align_corners=False)
+        if noise_hat.shape[-1] != self.image_width:
+            noise_hat = F.interpolate(noise_hat, size=(self.image_width, self.image_width), mode='bilinear', align_corners=False)
+        if y.shape[-1] != self.image_width:
+            y = F.interpolate(y, size=(self.image_width, self.image_width), mode='bilinear', align_corners=False)
+            y = y.mean(dim=1, keepdim=True)  # Assuming y is a single channel sinogram
 
         for i in indices:
             x_0_pred: torch.Tensor = (x_t - extract(self.gfp.alphas_one_minus_cumprod_sqrt, t, x_t.shape) * noise_hat) / extract(self.gfp.alphas_cumprod_sqrt, t, x_t.shape)

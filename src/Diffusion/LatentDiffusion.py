@@ -148,11 +148,11 @@ class LatentDiffusionConditional(LatentDiffusion):
         with torch.no_grad():
             latents=self.ae.encode(self.input_T(output)).detach()*self.latent_scale_factor
             latents_condition=self.ae.encode(self.input_T(condition)).detach()*self.latent_scale_factor
-        loss = self.model.p_loss(latents, latents_condition)
-        
+        loss, output_noisy, noise_hat, t = self.model.p_loss(latents, latents_condition) 
+
         self.log('train_loss',loss)
         
-        return loss
+        return loss, output_noisy, noise_hat, t # ADDED: extra stuff for physics loss
             
     def validation_step(self, batch, batch_idx):     
         
@@ -161,7 +161,7 @@ class LatentDiffusionConditional(LatentDiffusion):
         with torch.no_grad():
             latents=self.ae.encode(self.input_T(output)).detach()*self.latent_scale_factor
             latents_condition=self.ae.encode(self.input_T(condition)).detach()*self.latent_scale_factor
-        loss = self.model.p_loss(latents, latents_condition)
+        loss, _, _, _ = self.model.p_loss(latents, latents_condition)
         
         self.log('val_loss',loss)
         
