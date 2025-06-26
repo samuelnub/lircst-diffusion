@@ -52,6 +52,10 @@ class ECDiffusion(pl.LightningModule):
             A_ut_dir='/home/samnub/dev/lircst-iterecon/data_discretised/A_ut.npy',
         ) if physics else None
 
+    def on_load_checkpoint(self, checkpoint):
+        print(f'Loading checkpoint: epoch {checkpoint["epoch"]} | step {checkpoint["global_step"]}')
+        return super().on_load_checkpoint(checkpoint)
+
     def preprocess(self, image: torch.Tensor | None=None, condition: torch.Tensor | None=None):
         # Pre-process our phantom images and conditions (no need for a separate conditional encoder here)
 
@@ -88,13 +92,13 @@ class ECDiffusion(pl.LightningModule):
                     phan = F.interpolate(phan.unsqueeze(0), size=self.image_shape[-2:], mode='bilinear', align_corners=False).squeeze(0)
 
             if sino is not None:
+                sino = sino.sum(dim=-1, keepdim=True)
                 min_sino = torch.min(sino)
                 max_sino = torch.max(sino)
 
-                sino = sino.sum(dim=-1, keepdim=True)
                 sino = sino.permute(2, 0, 1)  # Change to (C, H, W) format
-                sino = F.interpolate(sino.unsqueeze(0), size=self.image_shape[-2:], mode='bilinear', align_corners=False).squeeze(0)
                 sino = ((sino - min_sino) / (max_sino - min_sino)) * 2 - 1
+                sino = F.interpolate(sino.unsqueeze(0), size=self.image_shape[-2:], mode='bilinear', align_corners=False).squeeze(0)
 
                 if self.latent:
                     sino = sino.repeat(self.image_shape[-3], 1, 1) # Needs 3 channels
