@@ -183,7 +183,12 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
 
         # reverse pass
         model_input=torch.cat([output_noisy,condition],1).to(device)
-        noise_hat = self.model(model_input, t) 
+        target_pred = self.model(model_input, t) 
+
+        # We want to do x0 prediction
+        # For eps prediction, we'd leave it as target = noise
+        # ADDED
+        target = output
             
         # apply loss
-        return self.loss_fn(noise, noise_hat), output_noisy, noise_hat, t # ADDED: return noisy output and noise prediction and timestep for our physics model
+        return self.loss_fn(target, target_pred), output_noisy, target_pred, t # ADDED: return noisy output and noise prediction and timestep for our physics model

@@ -11,8 +11,12 @@ import numpy as np
 from sampler_wrapper import SamplerWrapper
 from physics_inc import PhysicsIncorporated
 
-from skimage.metrics import peak_signal_noise_ratio as PeakSignalNoiseRatio
-from skimage.metrics import structural_similarity as StructuralSimilarity
+from torchmetrics.image import PeakSignalNoiseRatio as PSNR
+from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
+from torchmetrics import MeanSquaredError as MSE
+
+import matplotlib.pyplot as plt
+from IPython.display import display, clear_output
 
 
 class ECDiffusion(pl.LightningModule):
@@ -51,6 +55,12 @@ class ECDiffusion(pl.LightningModule):
             gaussian_forward_process=self.model.diffusion_process.forward_process if not self.latent else self.model.diffusion_process.model.forward_process,
             A_ut_dir='/home/samnub/dev/lircst-iterecon/data_discretised/A_ut.npy',
         ) if physics else None
+
+        self.metrics = {
+            'psnr': PSNR(data_range=1.0).cuda(),
+            'ssim': SSIM(data_range=1.0).cuda(),  
+            'mse': MSE().cuda(),
+        }
 
     def on_load_checkpoint(self, checkpoint):
         print(f'Loading checkpoint: epoch {checkpoint["epoch"]} | step {checkpoint["global_step"]}')
@@ -130,22 +140,29 @@ class ECDiffusion(pl.LightningModule):
         t: torch.Tensor | None = None
 
         if not self.latent:
-            loss, x_t, noise_hat, t = self.model.diffusion_process.p_loss(image, condition)
+            loss, x_t, target_pred, t = self.model.diffusion_process.p_loss(image, condition)
         else:
-            loss, x_t, noise_hat, t = self.model.diffusion_process.training_step((condition, image), batch_idx=batch_idx)
+            loss, x_t, target_pred, t = self.model.diffusion_process.training_step((condition, image), batch_idx=batch_idx)
 
         if self.physics_model is not None:
             # Apply physics model to the loss
-            physics_loss = self.physics_model(x_t, noise_hat, t, condition)
+            physics_loss: torch.Tensor | None = None
+            if not self.latent:
+                physics_loss = self.physics_model(x_t, target_pred, t, condition)
+            else:
+                decoded_target_pred: torch.Tensor | None = None
+                with torch.no_grad():
+                    decoded_target_pred = self.model.diffusion_process.ae.decode(target_pred) / self.model.diffusion_process.latent_scale_factor
+                physics_loss = self.physics_model(x_t, decoded_target_pred, t, condition)
             loss += physics_loss * 0.5 # Adjust the weight as needed
 
         self.log('train_loss', loss, prog_bar=True)
         
         return loss
-    '''
+
     def validation_step(self, batch, batch_idx):
-        return self.loss_evaluation(batch, batch_idx)
-    '''
+        return self.loss_evaluation(batch, batch_idx, to_print=True)
+
     def test_step(self, batch, batch_idx):
         return self.loss_evaluation(batch, batch_idx)
     
@@ -154,13 +171,13 @@ class ECDiffusion(pl.LightningModule):
                           batch_size=self.batch_size,
                           shuffle=True,
                           num_workers=4)
-    '''
+
     def val_dataloader(self):
         return DataLoader(self.valid_dataset,
                           batch_size=self.batch_size,
-                          shuffle=False,
+                          shuffle=True,
                           num_workers=4)
-    '''
+
     def test_dataloader(self):
         return DataLoader(self.test_dataset,
                           batch_size=self.batch_size,
@@ -170,48 +187,78 @@ class ECDiffusion(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.AdamW(list(filter(lambda p: p.requires_grad, self.model.parameters())), lr=self.lr)
 
-    def loss_evaluation(self, batch, batch_idx, to_print=False):
+    def loss_evaluation(self, batch, batch_idx, to_print=False, return_pred=False):
         image, condition, phantom_id = batch
 
         image, condition = self.preprocess(image=image, condition=condition)
 
         pred, _ = self.forward(condition)
 
+        # Pre-process our prediction so that it's within [-1, 1] range
+        pred, _ = self.preprocess(image=pred)
+
         # Calculate PSNR and SSIM
         # If dimensions are not the same, resize the prediction to match the image
         if pred.shape != image.shape:
             pred = F.interpolate(pred, size=image.shape[-1], mode='bilinear', align_corners=False)
 
-        data_range: float = 2.0 # [-1, 1]
+        # Rescale the images to [0, 1] range for PSNR and SSIM calculations
+        pred = (pred + 1) / 2
+        image = (image + 1) / 2
 
         psnr_scat: float = 0
         ssim_scat: float = 0
+        rmse_scat: float = 0
 
         psnr_atten: float = 0
         ssim_atten: float = 0
+        rmse_atten: float = 0
 
-        # As we have to do this with skimage, we need to convert the tensors to numpy arrays and iterate over the batch
-        # This is not the most efficient way, but it works
-        for i in range(image.shape[0]):
-            pred_np = pred[i].cpu().numpy().astype(np.float32)
-            image_np = image[i].cpu().numpy().astype(np.float32)
+        psnr_scat = self.metrics['psnr'](pred[:, 0, :, :].unsqueeze(1), image[:, 0, :, :].unsqueeze(1))
+        ssim_scat = self.metrics['ssim'](pred[:, 0, :, :].unsqueeze(1), image[:, 0, :, :].unsqueeze(1))
+        rmse_scat = torch.sqrt(self.metrics['mse'](pred[:, 0, :, :].reshape(-1), image[:, 0, :, :].reshape(-1)))
 
-            psnr_scat += PeakSignalNoiseRatio(pred_np[0], image_np[0], data_range=data_range) / image.shape[0]
-            ssim_scat += StructuralSimilarity(pred_np[0], image_np[0], data_range=data_range) / image.shape[0]
-
-            psnr_atten += PeakSignalNoiseRatio(pred_np[-1], image_np[-1], data_range=data_range) / image.shape[0]
-            ssim_atten += StructuralSimilarity(pred_np[-1], image_np[-1], data_range=data_range) / image.shape[0]
+        psnr_atten = self.metrics['psnr'](pred[:, -1, :, :].unsqueeze(1), image[:, -1, :, :].unsqueeze(1))
+        ssim_atten = self.metrics['ssim'](pred[:, -1, :, :].unsqueeze(1), image[:, -1, :, :].unsqueeze(1))
+        rmse_atten = torch.sqrt(self.metrics['mse'](pred[:, -1, :, :].reshape(-1), image[:, -1, :, :].reshape(-1)))
 
         self.log('psnr_scat', psnr_scat, prog_bar=True, on_step=False, on_epoch=True)
         self.log('ssim_scat', ssim_scat, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('rmse_scat', rmse_scat, prog_bar=True, on_step=False, on_epoch=True)
 
         self.log('psnr_atten', psnr_atten, prog_bar=True, on_step=False, on_epoch=True)
         self.log('ssim_atten', ssim_atten, prog_bar=True, on_step=False, on_epoch=True)
-        
-        if to_print:
-            print(f'Batch {batch_idx}: PSNR_scat: {psnr_scat:.4f}, SSIM_scat: {ssim_scat:.4f} | PSNR_atten: {psnr_atten:.4f}, SSIM_atten: {ssim_atten:.4f}')
+        self.log('rmse_atten', rmse_atten, prog_bar=True, on_step=False, on_epoch=True)
 
-        return psnr_scat, ssim_scat, psnr_atten, ssim_atten
+        if to_print:
+            # Display the prediction and the ground truth for first item in batch
+            clear_output(wait=True)
+            plt.figure(figsize=(12, 6))
+            plt.subplot(1, 4, 1)
+            plt.title(f'Pred Scat')
+            plt.imshow(pred[0, 0].detach().cpu().numpy(), cmap='gray')
+            plt.axis('off')
+            plt.subplot(1, 4, 2)
+            plt.title(f'Pred Atten')
+            plt.imshow(pred[0, -1].detach().cpu().numpy(), cmap='gray')
+            plt.axis('off')
+            plt.subplot(1, 4, 3)
+            plt.title(f'GT Scat')
+            plt.imshow(image[0, 0].detach().cpu().numpy(), cmap='gray')
+            plt.axis('off')
+            plt.subplot(1, 4, 4)
+            plt.title(f'GT Atten (Phan ID {phantom_id[0]})')
+            plt.imshow(image[0, -1].detach().cpu().numpy(), cmap='gray')
+            plt.axis('off')
+            plt.tight_layout()
+            display(plt.gcf())
+            plt.close()
+
+            print(f'Phantom ID: {phantom_id}')
+            print(f'PSNR (scatter): {psnr_scat:.4f}, SSIM (scatter): {ssim_scat:.4f}, RMSE (scatter): {rmse_scat:.4f}')
+            print(f'PSNR (attenuation): {psnr_atten:.4f}, SSIM (attenuation): {ssim_atten:.4f}, RMSE (attenuation): {rmse_atten:.4f}')
+
+        return psnr_scat, ssim_scat, rmse_scat, psnr_atten, ssim_atten, rmse_atten, pred if return_pred else None
     
 
 class EncodedConditionalDiffusion(nn.Module):
