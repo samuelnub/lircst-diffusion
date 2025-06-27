@@ -20,4 +20,5 @@ LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
 262       Modules in train mode
 0         Modules in eval mode
 /home/samnub/anaconda3/envs/lircst-diffusion/lib/python3.13/site-packages/pytorch_lightning/trainer/connectors/data_connector.py:476: Your `val_dataloader`'s sampler has shuffling enabled, it is strongly recommended that you turn shuffling off for val/test dataloaders.
-Epoch 0:  24%|██▍       | 228/936 [01:41<05:14,  2.25it/s, v_num=0, train_loss=0.127] 
+Epoch 1:   7%|▋         | 62/936 [00:28<06:40,  2.18it/s, v_num=0, train_loss=0.0716] 
+                                                                       

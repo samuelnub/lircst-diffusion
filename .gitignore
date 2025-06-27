@@ -3,3 +3,4 @@ models/*
 data/*
 *.ckpt
 keys.py
+wandb/

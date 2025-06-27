@@ -23,7 +23,7 @@ class PhysicsIncorporated(nn.Module):
         self.A_ub: torch.Tensor | None = None
         self.A_tb: torch.Tensor | None = None
 
-        self.stochastic_proportion: float = 1/16 # Only use 1/nth of the batch to compute loss
+        self.stochastic_proportion: float = 1/4 # Only use 1/nth of the batch to compute loss
 
         self.loss_metric = SSIM(data_range=1.0, size_average=True, channel=1).cuda()  # Assuming single channel for sinogram
 
