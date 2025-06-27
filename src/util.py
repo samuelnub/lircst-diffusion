@@ -2,7 +2,8 @@ import os
 import time
 
 def generate_directory_name(model_name, preexisting: str|None=None):
-    return f"../models/{model_name}/{int(time.time()) if preexisting is None else preexisting}/"
+    timestamp = int(time.time())
+    return f"../models/{model_name}/{timestamp if preexisting is None else preexisting}/", timestamp
 
 def get_latest_ckpt(model_name, latest_dir: str|None=None):
     model_dir = f"../models/{model_name}/"

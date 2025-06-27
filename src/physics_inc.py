@@ -8,6 +8,8 @@ import math
 import matplotlib.pyplot as plt
 from IPython.display import display, clear_output
 
+import wandb
+
 class PhysicsIncorporated(nn.Module):
     def __init__(self, 
                  gaussian_forward_process: GaussianForwardProcess,
@@ -35,7 +37,7 @@ class PhysicsIncorporated(nn.Module):
         if A_tb_dir is not None:
             self.A_tb = torch.from_numpy(np.load(A_tb_dir)).float().cuda()
 
-    def forward(self, x_t: torch.Tensor, target_pred: torch.Tensor, t, y: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_t: torch.Tensor, target_pred: torch.Tensor, t, y: torch.Tensor, epoch_and_step: tuple|None=None) -> torch.Tensor:
         # Apply forward operator to our predicted x_0 based on x_t and noise_hat, and calculate loss between the predicted and actual y.
 
         # Stochastic sampling
@@ -70,8 +72,8 @@ class PhysicsIncorporated(nn.Module):
                 loss_total += loss_ut * (1/x_t.shape[0]) # Scale by batch size
 
                 # debugging: plot predicted x_0 and sino_pred_ut and y
-                if False and i == indices[0]:  # Only plot for the first sample in the batch
-                    clear_output(wait=True)
+                if epoch_and_step is not None and epoch_and_step[0] % 5 == 0 and i == indices[0]:  # Only plot for the first sample in the batch
+
                     plt.figure(figsize=(12, 6))
                     plt.subplot(1, 4, 1)
                     plt.title(f'Predicted x_0 (scat) (i:{i})')
@@ -93,7 +95,9 @@ class PhysicsIncorporated(nn.Module):
                     plt.imshow(y[i][0].detach().cpu().numpy(), cmap='gray')
                     plt.axis('off')
 
-                    display(plt.gcf())
+                    fig = plt.gcf()
+                    wandb.log({"phys/pred_fig": fig}, step=epoch_and_step[1])
+
                     plt.close()
 
         # TODO: Implement A_ub and A_tb if needed

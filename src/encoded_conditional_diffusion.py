@@ -18,6 +18,8 @@ from torchmetrics import MeanSquaredError as MSE
 import matplotlib.pyplot as plt
 from IPython.display import display, clear_output
 
+import wandb
+
 
 class ECDiffusion(pl.LightningModule):
     def __init__(self,
@@ -146,22 +148,34 @@ class ECDiffusion(pl.LightningModule):
 
         if self.physics_model is not None:
             # Apply physics model to the loss
+            physics_loss_weight = 0.5  # Adjust the weight as needed
             physics_loss: torch.Tensor | None = None
+            epoch_and_step: tuple | None = (self.current_epoch, self.global_step) if batch_idx == 0 else None
             if not self.latent:
-                physics_loss = self.physics_model(x_t, target_pred, t, condition)
+                physics_loss = self.physics_model(x_t, target_pred, t, condition, epoch_and_step=epoch_and_step)
             else:
                 decoded_target_pred: torch.Tensor | None = None
                 with torch.no_grad():
                     decoded_target_pred = self.model.diffusion_process.ae.decode(target_pred) / self.model.diffusion_process.latent_scale_factor
-                physics_loss = self.physics_model(x_t, decoded_target_pred, t, condition)
-            loss += physics_loss * 0.5 # Adjust the weight as needed
+                physics_loss = self.physics_model(x_t, decoded_target_pred, t, condition, epoch_and_step=epoch_and_step)
+            loss += physics_loss * physics_loss_weight
 
         self.log('train_loss', loss, prog_bar=True)
+
+        if batch_idx % 10 == 0:
+            wandb.log({
+                'train/loss': loss.item(),
+            }, step=self.global_step)
         
         return loss
 
     def validation_step(self, batch, batch_idx):
-        return self.loss_evaluation(batch, batch_idx, to_print=True)
+        # This will run every epoch, but we only want to evaluate the visual loss every n epochs
+        eval_every_n_epochs = 20
+        if self.current_epoch > 0 and self.current_epoch % eval_every_n_epochs == 0:
+            # Only evaluate visual loss every n epochs (computationally expensive)
+            return self.loss_evaluation(batch, batch_idx, to_print=True)
+        return None
 
     def test_step(self, batch, batch_idx):
         return self.loss_evaluation(batch, batch_idx)
@@ -187,6 +201,7 @@ class ECDiffusion(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.AdamW(list(filter(lambda p: p.requires_grad, self.model.parameters())), lr=self.lr)
 
+    @torch.no_grad()
     def loss_evaluation(self, batch, batch_idx, to_print=False, return_pred=False):
         image, condition, phantom_id = batch
 
@@ -222,41 +237,55 @@ class ECDiffusion(pl.LightningModule):
         ssim_atten = self.metrics['ssim'](pred[:, -1, :, :].unsqueeze(1), image[:, -1, :, :].unsqueeze(1))
         rmse_atten = torch.sqrt(self.metrics['mse'](pred[:, -1, :, :].reshape(-1), image[:, -1, :, :].reshape(-1)))
 
-        self.log('psnr_scat', psnr_scat, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('ssim_scat', ssim_scat, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('rmse_scat', rmse_scat, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('psnr_scat', psnr_scat, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
+        self.log('ssim_scat', ssim_scat, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
+        self.log('rmse_scat', rmse_scat, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
 
-        self.log('psnr_atten', psnr_atten, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('ssim_atten', ssim_atten, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('rmse_atten', rmse_atten, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('psnr_atten', psnr_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
+        self.log('ssim_atten', ssim_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
+        self.log('rmse_atten', rmse_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
+
+        wandb.log({
+            'eval/psnr_scat': psnr_scat.item(),
+            'eval/ssim_scat': ssim_scat.item(),
+            'eval/rmse_scat': rmse_scat.item(),
+            'eval/psnr_atten': psnr_atten.item(),
+            'eval/ssim_atten': ssim_atten.item(),
+            'eval/rmse_atten': rmse_atten.item(),
+        }, step=self.global_step)
 
         if to_print:
             # Display the prediction and the ground truth for first item in batch
-            clear_output(wait=True)
+
             plt.figure(figsize=(12, 6))
             plt.subplot(1, 4, 1)
-            plt.title(f'Pred Scat')
+            plt.title(f'Pred-s (PSNR s/a {psnr_scat:.2f},{psnr_atten:.2f})')
             plt.imshow(pred[0, 0].detach().cpu().numpy(), cmap='gray')
             plt.axis('off')
             plt.subplot(1, 4, 2)
-            plt.title(f'Pred Atten')
+            plt.title(f'Pred-a (SSIM s/a {ssim_scat:.2f},{ssim_atten:.2f})')
             plt.imshow(pred[0, -1].detach().cpu().numpy(), cmap='gray')
             plt.axis('off')
             plt.subplot(1, 4, 3)
-            plt.title(f'GT Scat')
+            plt.title(f'GT-s (RMSE s/a {rmse_scat:.4f},{rmse_atten:.4f})')
             plt.imshow(image[0, 0].detach().cpu().numpy(), cmap='gray')
             plt.axis('off')
             plt.subplot(1, 4, 4)
-            plt.title(f'GT Atten (Phan ID {phantom_id[0]})')
+            plt.title(f'GT-a (Phan ID {phantom_id[0]})')
             plt.imshow(image[0, -1].detach().cpu().numpy(), cmap='gray')
             plt.axis('off')
-            plt.tight_layout()
-            display(plt.gcf())
+
+            fig = plt.gcf()
+
+            wandb.log({
+                'eval/pred_fig': fig,
+            }, step=self.global_step)
+
             plt.close()
 
-            print(f'Phantom ID: {phantom_id}')
-            print(f'PSNR (scatter): {psnr_scat:.4f}, SSIM (scatter): {ssim_scat:.4f}, RMSE (scatter): {rmse_scat:.4f}')
-            print(f'PSNR (attenuation): {psnr_atten:.4f}, SSIM (attenuation): {ssim_atten:.4f}, RMSE (attenuation): {rmse_atten:.4f}')
+            #print(f'Phantom ID: {phantom_id}')
+            #print(f'PSNR (scatter): {psnr_scat:.4f}, SSIM (scatter): {ssim_scat:.4f}, RMSE (scatter): {rmse_scat:.4f}')
+            #print(f'PSNR (attenuation): {psnr_atten:.4f}, SSIM (attenuation): {ssim_atten:.4f}, RMSE (attenuation): {rmse_atten:.4f}')
 
         return psnr_scat, ssim_scat, rmse_scat, psnr_atten, ssim_atten, rmse_atten, pred if return_pred else None
     
