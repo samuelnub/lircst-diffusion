@@ -1,7 +1,0 @@
-{"time":"2025-06-28T00:15:59.407195518+01:00","level":"INFO","msg":"stream: starting","core version":"0.20.1","symlink path":"/home/samnub/dev/lircst-diffusion/src/wandb/run-20250628_001559-e48rlhdm/logs/debug-core.log"}
-{"time":"2025-06-28T00:15:59.713529394+01:00","level":"INFO","msg":"stream: created new stream","id":"e48rlhdm"}
-{"time":"2025-06-28T00:15:59.713574281+01:00","level":"INFO","msg":"stream: started","id":"e48rlhdm"}
-{"time":"2025-06-28T00:15:59.713610174+01:00","level":"INFO","msg":"writer: Do: started","stream_id":"e48rlhdm"}
-{"time":"2025-06-28T00:15:59.713649849+01:00","level":"INFO","msg":"sender: started","stream_id":"e48rlhdm"}
-{"time":"2025-06-28T00:15:59.713668215+01:00","level":"INFO","msg":"handler: started","stream_id":"e48rlhdm"}
-{"time":"2025-06-28T00:15:59.891156436+01:00","level":"INFO","msg":"Starting system monitor"}

@@ -12,6 +12,9 @@ from torch import nn
 
 from .beta_schedules import *
 
+from util import beta_scheduler
+
+
 class ForwardModel(nn.Module):
     """
         (Forward Model Template)
@@ -19,7 +22,7 @@ class ForwardModel(nn.Module):
     
     def __init__(self,
                  num_timesteps=1000,
-                 schedule='linear'
+                 schedule=beta_scheduler
                 ):
         
         super().__init__()
@@ -48,7 +51,7 @@ class GaussianForwardProcess(ForwardModel):
     
     def __init__(self,
                  num_timesteps=1000,
-                 schedule='linear'
+                 schedule=beta_scheduler
                 ):
         
         super().__init__(num_timesteps=num_timesteps,

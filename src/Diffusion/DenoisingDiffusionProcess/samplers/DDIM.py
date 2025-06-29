@@ -7,6 +7,9 @@ import torch
 from torch import nn
 
 from ..beta_schedules import *
+
+from util import beta_scheduler
+
     
 class DDIM_Sampler(nn.Module):
     
@@ -14,7 +17,7 @@ class DDIM_Sampler(nn.Module):
                  num_timesteps=100,
                  train_timesteps=1000,
                  clip_sample=True,
-                 schedule='linear'
+                 schedule=beta_scheduler
                 ):
         
         super().__init__()

@@ -59,10 +59,11 @@ class ECDiffusion(pl.LightningModule):
         ) if physics else None
 
         self.metrics = {
-            'psnr': PSNR(data_range=1.0).cuda(),
-            'ssim': SSIM(data_range=1.0).cuda(),  
+            'psnr': PSNR().cuda(),
+            'ssim': SSIM().cuda(),  
             'mse': MSE().cuda(),
         }
+        
 
     def on_load_checkpoint(self, checkpoint):
         print(f'Loading checkpoint: epoch {checkpoint["epoch"]} | step {checkpoint["global_step"]}')
@@ -127,9 +128,9 @@ class ECDiffusion(pl.LightningModule):
         condition = args[0]
 
         _, condition = self.preprocess(condition=condition)
-        x_t = self.model.diffusion_process(condition, self.sampler_wrapper.get_sampler(), *args[2:], **kwargs)  
+        pred = self.model.diffusion_process(condition, self.sampler_wrapper.get_sampler(), *args[2:], **kwargs)  
 
-        return x_t, condition
+        return pred, condition
     
     def training_step(self, batch, batch_idx):
         image, condition, phantom_id = batch
@@ -165,8 +166,13 @@ class ECDiffusion(pl.LightningModule):
         if batch_idx % 10 == 0:
             wandb.log({
                 'train/loss': loss.item(),
-            }, step=self.global_step)
-        
+            })
+            if batch_idx == 0:
+                wandb.log({
+                    'train/epoch': self.current_epoch,
+                    'train/global_step': self.global_step,
+                })
+
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -178,7 +184,8 @@ class ECDiffusion(pl.LightningModule):
         return None
 
     def test_step(self, batch, batch_idx):
-        return self.loss_evaluation(batch, batch_idx)
+        fig_every_n_epochs = 10
+        return self.loss_evaluation(batch, batch_idx, to_print=True if batch_idx % fig_every_n_epochs == 0 else False)
     
     def train_dataloader(self):
         return DataLoader(self.train_dataset,
@@ -194,7 +201,7 @@ class ECDiffusion(pl.LightningModule):
 
     def test_dataloader(self):
         return DataLoader(self.test_dataset,
-                          batch_size=self.batch_size,
+                          batch_size=1, # When testing, we use size of 1, similar to how we would do actual inference
                           shuffle=False,
                           num_workers=4)
 
@@ -205,21 +212,20 @@ class ECDiffusion(pl.LightningModule):
     def loss_evaluation(self, batch, batch_idx, to_print=False, return_pred=False):
         image, condition, phantom_id = batch
 
-        image, condition = self.preprocess(image=image, condition=condition)
+        image, _ = self.preprocess(image=image) # Don't double-preprocess the condition
 
-        pred, _ = self.forward(condition)
+        pred, encoded_condition = self.forward(condition)
 
         # Pre-process our prediction so that it's within [-1, 1] range
         pred, _ = self.preprocess(image=pred)
 
-        # Calculate PSNR and SSIM
         # If dimensions are not the same, resize the prediction to match the image
         if pred.shape != image.shape:
             pred = F.interpolate(pred, size=image.shape[-1], mode='bilinear', align_corners=False)
 
         # Rescale the images to [0, 1] range for PSNR and SSIM calculations
-        pred = (pred + 1) / 2
-        image = (image + 1) / 2
+        #pred = (pred + 1) / 2
+        #image = (image + 1) / 2
 
         psnr_scat: float = 0
         ssim_scat: float = 0
@@ -252,40 +258,41 @@ class ECDiffusion(pl.LightningModule):
             'eval/psnr_atten': psnr_atten.item(),
             'eval/ssim_atten': ssim_atten.item(),
             'eval/rmse_atten': rmse_atten.item(),
-        }, step=self.global_step)
+        })
 
         if to_print:
             # Display the prediction and the ground truth for first item in batch
 
             plt.figure(figsize=(12, 6))
-            plt.subplot(1, 4, 1)
-            plt.title(f'Pred-s (PSNR s/a {psnr_scat:.2f},{psnr_atten:.2f})')
+            plt.subplot(1, 5, 1)
+            plt.title(f'{phantom_id[0]}')
+            plt.imshow(encoded_condition[0, 0].detach().cpu().numpy(), cmap='gray')
+            plt.axis('off')
+            plt.subplot(1, 5, 2)
+            plt.title(f'(PSNR:{psnr_scat.item():.2f}, SSIM:{ssim_scat.item():.2f}, RMSE:{rmse_scat.item():.2f})')
             plt.imshow(pred[0, 0].detach().cpu().numpy(), cmap='gray')
             plt.axis('off')
-            plt.subplot(1, 4, 2)
-            plt.title(f'Pred-a (SSIM s/a {ssim_scat:.2f},{ssim_atten:.2f})')
-            plt.imshow(pred[0, -1].detach().cpu().numpy(), cmap='gray')
-            plt.axis('off')
-            plt.subplot(1, 4, 3)
-            plt.title(f'GT-s (RMSE s/a {rmse_scat:.4f},{rmse_atten:.4f})')
+            plt.subplot(1, 5, 3)
+            plt.title(f'Scat')
             plt.imshow(image[0, 0].detach().cpu().numpy(), cmap='gray')
             plt.axis('off')
-            plt.subplot(1, 4, 4)
-            plt.title(f'GT-a (Phan ID {phantom_id[0]})')
+            plt.subplot(1, 5, 4)
+            plt.title(f'(PSNR:{psnr_atten.item():.2f}, SSIM:{ssim_atten.item():.2f}, RMSE:{rmse_atten.item():.2f})')
+            plt.imshow(pred[0, -1].detach().cpu().numpy(), cmap='gray')
+            plt.axis('off')
+            plt.subplot(1, 5, 5)
+            plt.title(f'Atten')
             plt.imshow(image[0, -1].detach().cpu().numpy(), cmap='gray')
             plt.axis('off')
+            plt.tight_layout()
 
             fig = plt.gcf()
 
             wandb.log({
                 'eval/pred_fig': fig,
-            }, step=self.global_step)
+            })
 
             plt.close()
-
-            #print(f'Phantom ID: {phantom_id}')
-            #print(f'PSNR (scatter): {psnr_scat:.4f}, SSIM (scatter): {ssim_scat:.4f}, RMSE (scatter): {rmse_scat:.4f}')
-            #print(f'PSNR (attenuation): {psnr_atten:.4f}, SSIM (attenuation): {ssim_atten:.4f}, RMSE (attenuation): {rmse_atten:.4f}')
 
         return psnr_scat, ssim_scat, rmse_scat, psnr_atten, ssim_atten, rmse_atten, pred if return_pred else None
     

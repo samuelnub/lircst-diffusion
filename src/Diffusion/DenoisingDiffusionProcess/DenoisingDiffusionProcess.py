@@ -11,13 +11,15 @@ from .forward import *
 from .samplers import *
 from .backbones.unet_convnext import *
 
+from util import extract, beta_scheduler # ADDED: utility function to extract values from tensors based on indices
+
 
 class DenoisingDiffusionProcess(nn.Module):
     
     def __init__(self,
                  generated_channels=3,              
                  loss_fn=F.mse_loss,
-                 schedule='linear',
+                 schedule=beta_scheduler,
                  num_timesteps=1000,
                  sampler=None
                 ):
@@ -104,7 +106,7 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
                  generated_channels=3,
                  condition_channels=3,
                  loss_fn=F.mse_loss,
-                 schedule='linear',
+                 schedule=beta_scheduler,
                  num_timesteps=1000,
                  sampler=None
                 ):
@@ -162,8 +164,14 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
         for i in tqdm(it, desc='diffusion sampling', total=num_timesteps) if verbose else it:
             t = torch.full((b,), i, device=device, dtype=torch.long)
             model_input=torch.cat([x_t,condition],1).to(device)
-            z_t=self.model(model_input,t) # prediction of noise            
-            x_t=self.sampler(x_t,t,z_t) # prediction of next state
+
+            x_0_pred = self.model(model_input, t)  # prediction of x_0
+            noise_hat = (x_t - extract(self.forward_process.alphas_cumprod_sqrt, t, x_t.shape) * x_0_pred) / extract(self.forward_process.alphas_one_minus_cumprod_sqrt, t, x_t.shape)
+            x_t = self.sampler(x_t, t, noise_hat)  # prediction of next state
+
+            # eps prediction
+            # z_t=self.model(model_input,t) # prediction of noise            
+            # x_t=self.sampler(x_t,t,z_t) # prediction of next state
             
         return x_t
         

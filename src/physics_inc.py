@@ -5,6 +5,8 @@ import torch.nn.functional as F
 from ssim import SSIM
 from Diffusion.DenoisingDiffusionProcess.forward import GaussianForwardProcess
 import math
+from util import extract
+
 import matplotlib.pyplot as plt
 from IPython.display import display, clear_output
 
@@ -95,8 +97,10 @@ class PhysicsIncorporated(nn.Module):
                     plt.imshow(y[i][0].detach().cpu().numpy(), cmap='gray')
                     plt.axis('off')
 
+                    plt.tight_layout()
+
                     fig = plt.gcf()
-                    wandb.log({"phys/pred_fig": fig}, step=epoch_and_step[1])
+                    wandb.log({"phys/pred_fig": fig})
 
                     plt.close()
 
@@ -104,9 +108,3 @@ class PhysicsIncorporated(nn.Module):
 
         return loss_total
 
-def extract(a, t, x_shape):
-    # https://github.com/Stability-AI/stablediffusion/blob/main/ldm/modules/diffusionmodules/util.py#L103
-    # https://github.com/lucidrains/denoising-diffusion-pytorch/blob/1d9d8dffb72e02172da8a77bee039b1c72b7c6d5/denoising_diffusion_pytorch/repaint.py#L431
-    b, *_ = t.shape
-    out = a.gather(-1, t)
-    return out.reshape(b, *((1,) * (len(x_shape) - 1)))

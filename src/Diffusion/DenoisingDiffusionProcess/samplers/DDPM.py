@@ -8,11 +8,14 @@ from torch import nn
 
 from ..beta_schedules import *
 
+from util import beta_scheduler
+
+
 class DDPM_Sampler(nn.Module):
     
     def __init__(self,
                  num_timesteps=1000,
-                 schedule='linear'
+                 schedule=beta_scheduler
                 ):
         
         super().__init__()
