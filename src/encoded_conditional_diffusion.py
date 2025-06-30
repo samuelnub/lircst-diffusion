@@ -10,6 +10,7 @@ import numpy as np
 
 from sampler_wrapper import SamplerWrapper
 from physics_inc import PhysicsIncorporated
+from util import sino_undersample, degradation
 
 from torchmetrics.image import PeakSignalNoiseRatio as PSNR
 from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
@@ -30,7 +31,9 @@ class ECDiffusion(pl.LightningModule):
                  batch_size=16,
                  lr=1e-4,
                  physics=False,
-                 latent=False):
+                 latent=False,
+                 predict_mode='eps',
+                 condition_A_T=True):
         super().__init__()
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
@@ -38,6 +41,8 @@ class ECDiffusion(pl.LightningModule):
         self.lr = lr
         self.batch_size = batch_size
         self.latent = latent
+        self.predict_mode = predict_mode  # 'eps' or 'x0'
+        self.condition_A_T = condition_A_T  # Whether to pass our condition (sinogram) through the physics model
 
         self.image_shape = (2, 128, 128) if not self.latent else (3, 256, 256)  # 2 channels: scatter and attenuation
 
@@ -48,15 +53,18 @@ class ECDiffusion(pl.LightningModule):
             train_dataset=self.train_dataset,
             valid_dataset=self.valid_dataset,
             latent=self.latent,
+            predict_mode=self.predict_mode
         )
 
         self.sampler_wrapper = SamplerWrapper(sample_timesteps=self.model.sample_timesteps,
                                              train_timesteps=self.model.train_timesteps)
 
+        self.physics = physics  # Whether to incorporate physics loss in the model
         self.physics_model: PhysicsIncorporated | None = PhysicsIncorporated(
             gaussian_forward_process=self.model.diffusion_process.forward_process if not self.latent else self.model.diffusion_process.model.forward_process,
             A_ut_dir='/home/samnub/dev/lircst-iterecon/data_discretised/A_ut.npy',
-        ) if physics else None
+            predict_mode=self.predict_mode,
+        ) # Necessary for all our configurations, even if physics=False
 
         self.metrics = {
             'psnr': PSNR().cuda(),
@@ -106,11 +114,21 @@ class ECDiffusion(pl.LightningModule):
 
             if sino is not None:
                 sino = sino.sum(dim=-1, keepdim=True)
+                sino = sino.permute(2, 0, 1)  # Change to (C, H, W) format
+
+                # Degradation is applied to the sinogram readings
+                if degradation > 0:
+                    sino = sino_undersample(sino.unsqueeze(0), degradation).squeeze(0)  # Apply degradation to the sinogram readings
+
                 min_sino = torch.min(sino)
                 max_sino = torch.max(sino)
 
-                sino = sino.permute(2, 0, 1)  # Change to (C, H, W) format
                 sino = ((sino - min_sino) / (max_sino - min_sino)) * 2 - 1
+
+                if self.condition_A_T:
+                    # Apply the pseudoinverse physics model to the sinogram
+                    sino = self.physics_model.A_T(sino.unsqueeze(0), 'ut').squeeze(0)
+
                 sino = F.interpolate(sino.unsqueeze(0), size=self.image_shape[-2:], mode='bilinear', align_corners=False).squeeze(0)
 
                 if self.latent:
@@ -147,9 +165,9 @@ class ECDiffusion(pl.LightningModule):
         else:
             loss, x_t, target_pred, t = self.model.diffusion_process.training_step((condition, image), batch_idx=batch_idx)
 
-        if self.physics_model is not None:
+        if self.physics and self.physics_model is not None:
             # Apply physics model to the loss
-            physics_loss_weight = 0.5  # Adjust the weight as needed
+            physics_loss_weight = 0.2  # Adjust the weight as needed
             physics_loss: torch.Tensor | None = None
             epoch_and_step: tuple | None = (self.current_epoch, self.global_step) if batch_idx == 0 else None
             if not self.latent:
@@ -163,29 +181,31 @@ class ECDiffusion(pl.LightningModule):
 
         self.log('train_loss', loss, prog_bar=True)
 
-        if batch_idx % 10 == 0:
-            wandb.log({
-                'train/loss': loss.item(),
-            })
-            if batch_idx == 0:
+        if wandb.run is not None:
+            if batch_idx % 10 == 0:
                 wandb.log({
-                    'train/epoch': self.current_epoch,
-                    'train/global_step': self.global_step,
+                    'train/loss': loss.item(),
                 })
+                if batch_idx == 0:
+                    wandb.log({
+                        'train/epoch': self.current_epoch,
+                        'train/global_step': self.global_step,
+                    })
 
         return loss
 
     def validation_step(self, batch, batch_idx):
         # This will run every epoch, but we only want to evaluate the visual loss every n epochs
-        eval_every_n_epochs = 20
+        eval_every_n_epochs = 10
+        fig_every_n_epochs = 4
         if self.current_epoch > 0 and self.current_epoch % eval_every_n_epochs == 0:
             # Only evaluate visual loss every n epochs (computationally expensive)
-            return self.loss_evaluation(batch, batch_idx, to_print=True)
+            return self.loss_evaluation(batch, batch_idx, to_print=True if batch_idx % fig_every_n_epochs == 0 else False)
         return None
 
     def test_step(self, batch, batch_idx):
         fig_every_n_epochs = 10
-        return self.loss_evaluation(batch, batch_idx, to_print=True if batch_idx % fig_every_n_epochs == 0 else False)
+        return self.loss_evaluation(batch, batch_idx, to_print=True if batch_idx % fig_every_n_epochs == 0 else False, is_test=True)
     
     def train_dataloader(self):
         return DataLoader(self.train_dataset,
@@ -196,12 +216,12 @@ class ECDiffusion(pl.LightningModule):
     def val_dataloader(self):
         return DataLoader(self.valid_dataset,
                           batch_size=self.batch_size,
-                          shuffle=True,
+                          shuffle=False,
                           num_workers=4)
 
     def test_dataloader(self):
         return DataLoader(self.test_dataset,
-                          batch_size=1, # When testing, we use size of 1, similar to how we would do actual inference
+                          batch_size=self.batch_size,
                           shuffle=False,
                           num_workers=4)
 
@@ -209,7 +229,7 @@ class ECDiffusion(pl.LightningModule):
         return torch.optim.AdamW(list(filter(lambda p: p.requires_grad, self.model.parameters())), lr=self.lr)
 
     @torch.no_grad()
-    def loss_evaluation(self, batch, batch_idx, to_print=False, return_pred=False):
+    def loss_evaluation(self, batch, batch_idx, to_print=False, return_pred=False, is_test=False):
         image, condition, phantom_id = batch
 
         image, _ = self.preprocess(image=image) # Don't double-preprocess the condition
@@ -224,8 +244,8 @@ class ECDiffusion(pl.LightningModule):
             pred = F.interpolate(pred, size=image.shape[-1], mode='bilinear', align_corners=False)
 
         # Rescale the images to [0, 1] range for PSNR and SSIM calculations
-        #pred = (pred + 1) / 2
-        #image = (image + 1) / 2
+        pred = ((pred + 1) / 2)
+        image = ((image + 1) / 2)
 
         psnr_scat: float = 0
         ssim_scat: float = 0
@@ -251,14 +271,24 @@ class ECDiffusion(pl.LightningModule):
         self.log('ssim_atten', ssim_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
         self.log('rmse_atten', rmse_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
 
-        wandb.log({
-            'eval/psnr_scat': psnr_scat.item(),
-            'eval/ssim_scat': ssim_scat.item(),
-            'eval/rmse_scat': rmse_scat.item(),
-            'eval/psnr_atten': psnr_atten.item(),
-            'eval/ssim_atten': ssim_atten.item(),
-            'eval/rmse_atten': rmse_atten.item(),
-        })
+        if wandb.run is not None:
+            wandb.log({
+                'eval/psnr_scat': psnr_scat.item(),
+                'eval/ssim_scat': ssim_scat.item(),
+                'eval/rmse_scat': rmse_scat.item(),
+                'eval/psnr_atten': psnr_atten.item(),
+                'eval/ssim_atten': ssim_atten.item(),
+                'eval/rmse_atten': rmse_atten.item(),
+            })
+            if is_test:
+                wandb.log({
+                    'test/psnr_scat': psnr_scat.item(),
+                    'test/ssim_scat': ssim_scat.item(),
+                    'test/rmse_scat': rmse_scat.item(),
+                    'test/psnr_atten': psnr_atten.item(),
+                    'test/ssim_atten': ssim_atten.item(),
+                    'test/rmse_atten': rmse_atten.item(),
+                })
 
         if to_print:
             # Display the prediction and the ground truth for first item in batch
@@ -288,9 +318,12 @@ class ECDiffusion(pl.LightningModule):
 
             fig = plt.gcf()
 
-            wandb.log({
-                'eval/pred_fig': fig,
-            })
+            if wandb.run is not None:
+                wandb.log({
+                    'eval/pred_fig': fig,
+                })
+            else:
+                display(fig)
 
             plt.close()
 
@@ -304,7 +337,8 @@ class EncodedConditionalDiffusion(nn.Module):
                  batch_size: int = 16,
                  train_dataset=None,
                  valid_dataset=None,
-                 latent: bool = False):
+                 latent: bool = False,
+                 predict_mode: str = 'eps'):
         super(EncodedConditionalDiffusion, self).__init__()
         self.input_output_shape = input_output_shape
         self.condition_out_shape = (1, *self.input_output_shape[1:])
@@ -317,17 +351,20 @@ class EncodedConditionalDiffusion(nn.Module):
         self.train_timesteps = num_timesteps
 
         self.latent = latent
+        self.predict_mode = predict_mode  # 'eps' or 'x0'
 
         self.diffusion_process = DenoisingDiffusionConditionalProcess(
             generated_channels=self.input_output_shape[0],
             condition_channels=self.condition_out_shape[0],
             num_timesteps=self.train_timesteps,
             loss_fn=F.mse_loss,
+            predict_mode=self.predict_mode,
         ) if not self.latent else LatentDiffusionConditional(
             num_timesteps=self.train_timesteps,
             batch_size=self.batch_size,
             train_dataset=self.train_dataset,
             valid_dataset=self.valid_dataset,
+            predict_mode=self.predict_mode,
         )
 
     def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:

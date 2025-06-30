@@ -17,13 +17,16 @@ class PhysicsIncorporated(nn.Module):
                  gaussian_forward_process: GaussianForwardProcess,
                  A_ut_dir: str | None = None,
                  A_ub_dir: str | None = None,
-                 A_tb_dir: str | None = None,):
+                 A_tb_dir: str | None = None,
+                 predict_mode: str = 'eps'):
         super(PhysicsIncorporated, self).__init__()
         self.gfp: GaussianForwardProcess = gaussian_forward_process
 
         self.A_ut: torch.Tensor | None = None
         self.A_ub: torch.Tensor | None = None
         self.A_tb: torch.Tensor | None = None
+
+        self.predict_mode: str = predict_mode  # 'eps' or 'x0'
 
         self.stochastic_proportion: float = 1/4 # Only use 1/nth of the batch to compute loss
 
@@ -34,10 +37,57 @@ class PhysicsIncorporated(nn.Module):
         # Load the forward operator matrices from the specified directory
         if A_ut_dir is not None:
             self.A_ut = torch.from_numpy(np.load(A_ut_dir)).float().cuda()
+            self.A_ut_T = self.A_ut.T  # Precompute the transpose for efficiency
         if A_ub_dir is not None:
             self.A_ub = torch.from_numpy(np.load(A_ub_dir)).float().cuda()
+            self.A_ub_T = self.A_ub.T  # Precompute the transpose for efficiency
         if A_tb_dir is not None:
             self.A_tb = torch.from_numpy(np.load(A_tb_dir)).float().cuda()
+            self.A_tb_T = self.A_tb.T  # Precompute the transpose for efficiency
+
+    def A(self, x: torch.Tensor, operator: str) -> torch.Tensor:
+        """
+        Apply the specified forward operator to the input tensor x.
+        """
+        y: torch.Tensor | None = None
+
+        A_matrix: torch.Tensor | None = None
+        if operator == 'ut':
+            A_matrix = self.A_ut
+        elif operator == 'ub':
+            A_matrix = self.A_ub
+        elif operator == 'tb':
+            A_matrix = self.A_tb
+
+        for i in range(x.shape[0]):
+            y_i = (A_matrix @ x[i].sum(dim=-3).view(-1)).view(1, 1, x.shape[-2], -1)
+            if y is None:
+                y = y_i
+            else:
+                y = torch.cat((y, y_i), dim=0)
+        return y
+    
+    def A_T(self, y: torch.Tensor, operator: str) -> torch.Tensor:
+        """
+        Apply the transpose of the specified forward operator to the input tensor y.
+        """
+        x: torch.Tensor | None = None
+
+        A_T_matrix: torch.Tensor | None = None
+        if operator == 'ut':
+            A_T_matrix = self.A_ut_T
+        elif operator == 'ub':
+            A_T_matrix = self.A_ub_T
+        elif operator == 'tb':
+            A_T_matrix = self.A_tb_T
+
+        for i in range(y.shape[0]):
+            x_i = (A_T_matrix @ y[i].sum(dim=-3).view(-1)).view(1, 1, y.shape[-2], -1)
+            if x is None:
+                x = x_i
+            else:
+                x = torch.cat((x, x_i), dim=0)
+        return x
 
     def forward(self, x_t: torch.Tensor, target_pred: torch.Tensor, t, y: torch.Tensor, epoch_and_step: tuple|None=None) -> torch.Tensor:
         # Apply forward operator to our predicted x_0 based on x_t and noise_hat, and calculate loss between the predicted and actual y.
@@ -54,14 +104,16 @@ class PhysicsIncorporated(nn.Module):
             y = F.interpolate(y, size=(self.image_width, self.image_width), mode='bilinear', align_corners=False)
             y = y.mean(dim=1, keepdim=True)  # Assuming y is a single channel sinogram
 
-        x_0_pred: torch.Tensor = target_pred
-        # ^^^ Previously, this was computed as: (when doing eps-prediction)
-        # torch.Tensor = (x_t - extract(self.gfp.alphas_one_minus_cumprod_sqrt, t, x_t.shape) * noise_hat) / extract(self.gfp.alphas_cumprod_sqrt, t, x_t.shape)
+        if self.predict_mode == 'eps':
+            x_0_pred: torch.Tensor = (x_t - extract(self.gfp.alphas_one_minus_cumprod_sqrt, t, x_t.shape) * target_pred) / extract(self.gfp.alphas_cumprod_sqrt, t, x_t.shape)
+
+        if self.predict_mode == 'x0':
+            x_0_pred: torch.Tensor = target_pred
 
         for i in indices:
             # Apply the forward operator to x_0_pred
             if self.A_ut is not None:
-                sino_pred_ut = (self.A_ut @ x_0_pred[i].sum(dim=-3).view(-1)).view(1, 1, x_t.shape[-2], -1)
+                sino_pred_ut = self.A(x_0_pred[i].unsqueeze(0), 'ut')  # Apply the forward operator
                 # Scale predicted sinogram to the same range as y
                 sino_pred_ut_min = sino_pred_ut.min()
                 sino_pred_ut_max = sino_pred_ut.max()
@@ -100,7 +152,9 @@ class PhysicsIncorporated(nn.Module):
                     plt.tight_layout()
 
                     fig = plt.gcf()
-                    wandb.log({"phys/pred_fig": fig})
+
+                    if wandb.run is not None:
+                        wandb.log({"phys/pred_fig": fig})
 
                     plt.close()
 

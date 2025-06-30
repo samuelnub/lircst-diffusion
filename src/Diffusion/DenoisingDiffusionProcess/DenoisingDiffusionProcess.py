@@ -108,7 +108,8 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
                  loss_fn=F.mse_loss,
                  schedule=beta_scheduler,
                  num_timesteps=1000,
-                 sampler=None
+                 sampler=None,
+                 predict_mode='eps'  # 'x0' or 'eps'
                 ):
         super().__init__()
         
@@ -117,6 +118,7 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
         self.condition_channels=condition_channels
         self.num_timesteps=num_timesteps
         self.loss_fn=loss_fn
+        self.predict_mode=predict_mode  # 'x0' or 'eps'
         
         # Forward Process
         self.forward_process=GaussianForwardProcess(num_timesteps=self.num_timesteps,
@@ -165,14 +167,16 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
             t = torch.full((b,), i, device=device, dtype=torch.long)
             model_input=torch.cat([x_t,condition],1).to(device)
 
-            x_0_pred = self.model(model_input, t)  # prediction of x_0
-            noise_hat = (x_t - extract(self.forward_process.alphas_cumprod_sqrt, t, x_t.shape) * x_0_pred) / extract(self.forward_process.alphas_one_minus_cumprod_sqrt, t, x_t.shape)
-            x_t = self.sampler(x_t, t, noise_hat)  # prediction of next state
-
             # eps prediction
-            # z_t=self.model(model_input,t) # prediction of noise            
-            # x_t=self.sampler(x_t,t,z_t) # prediction of next state
-            
+            if self.predict_mode == 'eps':
+                z_t=self.model(model_input,t) # prediction of noise            
+                x_t=self.sampler(x_t,t,z_t) # prediction of next state
+
+            if self.predict_mode == 'x0':
+                x_0_pred = self.model(model_input, t)  # prediction of x_0
+                noise_hat = (x_t - extract(self.forward_process.alphas_cumprod_sqrt, t, x_t.shape) * x_0_pred) / extract(self.forward_process.alphas_one_minus_cumprod_sqrt, t, x_t.shape)
+                x_t = self.sampler(x_t, t, noise_hat)  # prediction of next state
+
         return x_t
         
     def p_loss(self,output,condition):
@@ -193,10 +197,11 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
         model_input=torch.cat([output_noisy,condition],1).to(device)
         target_pred = self.model(model_input, t) 
 
-        # We want to do x0 prediction
-        # For eps prediction, we'd leave it as target = noise
-        # ADDED
-        target = output
+        if self.predict_mode == 'eps':
+            target = noise
+
+        if self.predict_mode == 'x0':
+            target = output
             
         # apply loss
         return self.loss_fn(target, target_pred), output_noisy, target_pred, t # ADDED: return noisy output and noise prediction and timestep for our physics model

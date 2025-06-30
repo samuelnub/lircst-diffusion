@@ -1,6 +1,7 @@
 import os
 import time
 
+import torch
 from torch.utils.data import *
 from lircst_ana_dataset import LircstAnaDataset
 from torch import Generator
@@ -8,23 +9,39 @@ from torch import Generator
 
 beta_scheduler = 'cosine'
 
+degradation: float = 0.0
 
+# TODO: transition to script not notebook
 model_args = {
+    "ECD-CAT": {
+        "physics": False,  # Don't use physics-based loss
+        "latent": False,  # Don't use latent diffusion
+        "predict_mode": 'eps',  # Use eps prediction
+        "condition_A_T": True,  # Use A_T for conditioning
+    },
     "ECD-Phys": {
         "physics": True,  # Use physics-based loss
         "latent": False,  # Don't use latent diffusion
+        "predict_mode": 'x0',
+        "condition_A_T": False,
     },
     "ECD": {
         "physics": False,  # Don't use physics-based loss
         "latent": False,  # Don't use latent diffusion
+        "predict_mode": 'x0',
+        "condition_A_T": False,
     },
     "ECLD-Phys": {
         "physics": True,  # Use physics-based loss
         "latent": True,  # Use latent diffusion
+        "predict_mode": 'x0',
+        "condition_A_T": False,
     },
     "ECLD": {
         "physics": False,  # Don't use physics-based loss
         "latent": True,  # Use latent diffusion
+        "predict_mode": 'x0',
+        "condition_A_T": False,
     },
 }
 
@@ -80,3 +97,30 @@ def extract(a, t, x_shape):
     b, *_ = t.shape
     out = a.gather(-1, t)
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
+
+
+def poisson_noise(x: torch.Tensor, noise_factor=0.1):
+    """
+    Add Poisson noise to the input tensor x.
+    """
+    # TODO: Make sure x is non-negative, as Poisson noise is defined for non-negative values
+
+    noise = torch.poisson(x * noise_factor) / noise_factor
+    return x + noise - x.mean(dim=(1, 2, 3), keepdim=True)  # Center the noise around zero
+
+
+def sino_undersample(y: torch.Tensor, mask_proportion: float=0.2) -> torch.Tensor:
+    """
+    Undersample the input tensor x using the provided mask.
+    The mask should be a binary tensor of the same shape as x.
+    """
+    # We are making a sinogram-like mask here, so vertically undersample the input tensor.
+
+    # assert we have BCHW format
+    if y.dim() != 4:
+        raise ValueError(f"Input tensor y must be in BCHW format, got {y.dim()} dimensions instead.")
+
+    mask: torch.Tensor = (torch.rand([y.shape[0], y.shape[1], 1, y.shape[3]]) > mask_proportion).expand(y.shape)  # Create a random boolean mask
+    mask = mask.float().cuda()  # Convert mask to float for multiplication
+
+    return y * mask  # Element-wise multiplication to apply the mask
