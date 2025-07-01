@@ -10,6 +10,7 @@ from torch import Generator
 beta_scheduler = 'cosine'
 
 degradation: float = 0.0
+global_normalisation: bool = False  # Use global normalization for the dataset
 
 # TODO: transition to script not notebook
 model_args = {

@@ -10,7 +10,8 @@ import numpy as np
 
 from sampler_wrapper import SamplerWrapper
 from physics_inc import PhysicsIncorporated
-from util import sino_undersample, degradation
+from lircst_ana_dataset import LircstAnaDataset as Lad
+from util import sino_undersample, degradation, global_normalisation
 
 from torchmetrics.image import PeakSignalNoiseRatio as PSNR
 from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
@@ -72,12 +73,11 @@ class ECDiffusion(pl.LightningModule):
             'mse': MSE().cuda(),
         }
         
-
     def on_load_checkpoint(self, checkpoint):
         print(f'Loading checkpoint: epoch {checkpoint["epoch"]} | step {checkpoint["global_step"]}')
         return super().on_load_checkpoint(checkpoint)
 
-    def preprocess(self, image: torch.Tensor | None=None, condition: torch.Tensor | None=None):
+    def preprocess(self, image: torch.Tensor | None=None, condition: torch.Tensor | None=None, global_norm: bool=False):
         # Pre-process our phantom images and conditions (no need for a separate conditional encoder here)
 
         image_out: torch.Tensor | None = None if image is None else torch.zeros((
@@ -100,10 +100,10 @@ class ECDiffusion(pl.LightningModule):
             sino = condition[i] if condition is not None else None
 
             if phan is not None:
-                min_phan1 = torch.min(phan[1])
-                max_phan1 = torch.max(phan[1])
-                min_phan0 = torch.min(phan[0])
-                max_phan0 = torch.max(phan[0])
+                min_phan0 = Lad.phan0_min if global_norm else torch.min(phan[0])
+                max_phan0 = Lad.phan0_max if global_norm else torch.max(phan[0])
+                min_phan1 = Lad.phan1_min if global_norm else torch.min(phan[1])
+                max_phan1 = Lad.phan1_max if global_norm else torch.max(phan[1])
                 phan[0] = ((phan[0] - min_phan0) / (max_phan0 - min_phan0)) * 2 - 1
                 phan[1] = ((phan[1] - min_phan1) / (max_phan1 - min_phan1)) * 2 - 1
 
@@ -120,14 +120,14 @@ class ECDiffusion(pl.LightningModule):
                 if degradation > 0:
                     sino = sino_undersample(sino.unsqueeze(0), degradation).squeeze(0)  # Apply degradation to the sinogram readings
 
-                min_sino = torch.min(sino)
-                max_sino = torch.max(sino)
-
-                sino = ((sino - min_sino) / (max_sino - min_sino)) * 2 - 1
-
                 if self.condition_A_T:
                     # Apply the pseudoinverse physics model to the sinogram
                     sino = self.physics_model.A_T(sino.unsqueeze(0), 'ut').squeeze(0)
+
+                min_sino = torch.min(sino) # TODO: if global_norm, we have no precomputed min/max values
+                max_sino = torch.max(sino)
+
+                sino = ((sino - min_sino) / (max_sino - min_sino)) * 2 - 1
 
                 sino = F.interpolate(sino.unsqueeze(0), size=self.image_shape[-2:], mode='bilinear', align_corners=False).squeeze(0)
 
@@ -157,7 +157,7 @@ class ECDiffusion(pl.LightningModule):
 
         loss: torch.Tensor | None = None
         x_t: torch.Tensor | None = None
-        noise_hat: torch.Tensor | None = None
+        target_pred: torch.Tensor | None = None
         t: torch.Tensor | None = None
 
         if not self.latent:
@@ -272,14 +272,15 @@ class ECDiffusion(pl.LightningModule):
         self.log('rmse_atten', rmse_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
 
         if wandb.run is not None:
-            wandb.log({
-                'eval/psnr_scat': psnr_scat.item(),
-                'eval/ssim_scat': ssim_scat.item(),
-                'eval/rmse_scat': rmse_scat.item(),
-                'eval/psnr_atten': psnr_atten.item(),
-                'eval/ssim_atten': ssim_atten.item(),
-                'eval/rmse_atten': rmse_atten.item(),
-            })
+            if not is_test:
+                wandb.log({
+                    'val/psnr_scat': psnr_scat.item(),
+                    'val/ssim_scat': ssim_scat.item(),
+                    'val/rmse_scat': rmse_scat.item(),
+                    'val/psnr_atten': psnr_atten.item(),
+                    'val/ssim_atten': ssim_atten.item(),
+                    'val/rmse_atten': rmse_atten.item(),
+                })
             if is_test:
                 wandb.log({
                     'test/psnr_scat': psnr_scat.item(),
