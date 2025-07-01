@@ -77,7 +77,7 @@ class ECDiffusion(pl.LightningModule):
         print(f'Loading checkpoint: epoch {checkpoint["epoch"]} | step {checkpoint["global_step"]}')
         return super().on_load_checkpoint(checkpoint)
 
-    def preprocess(self, image: torch.Tensor | None=None, condition: torch.Tensor | None=None, global_norm: bool=False):
+    def preprocess(self, image: torch.Tensor | None=None, condition: torch.Tensor | None=None, global_norm: bool=False, condition_perm: bool=True, condition_a_t: bool=None):
         # Pre-process our phantom images and conditions (no need for a separate conditional encoder here)
 
         image_out: torch.Tensor | None = None if image is None else torch.zeros((
@@ -114,15 +114,18 @@ class ECDiffusion(pl.LightningModule):
 
             if sino is not None:
                 sino = sino.sum(dim=-1, keepdim=True)
-                sino = sino.permute(2, 0, 1)  # Change to (C, H, W) format
+
+                if condition_perm:
+                    sino = sino.permute(2, 0, 1)  # Change to (C, H, W) format
 
                 # Degradation is applied to the sinogram readings
                 if degradation > 0:
                     sino = sino_undersample(sino.unsqueeze(0), degradation).squeeze(0)  # Apply degradation to the sinogram readings
 
-                if self.condition_A_T:
+                if (condition_a_t is None and self.condition_A_T) or condition_a_t is True:
                     # Apply the pseudoinverse physics model to the sinogram
                     sino = self.physics_model.A_T(sino.unsqueeze(0), 'ut').squeeze(0)
+                    # P.S. Our "sino" is now a misnomer, it's actually in phantom space now
 
                 min_sino = torch.min(sino) # TODO: if global_norm, we have no precomputed min/max values
                 max_sino = torch.max(sino)
@@ -153,31 +156,41 @@ class ECDiffusion(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         image, condition, phantom_id = batch
 
-        image, condition = self.preprocess(image=image, condition=condition)
+        sino_condition: torch.Tensor | None = None # Used if condition_A_T is false OR we have physics true
+        phan_condition: torch.Tensor | None = None # If condition_A_T is true
 
+        image, _ = self.preprocess(image=image)  # Preprocess the image (GT phantom)
+
+        if (not self.condition_A_T) or self.physics:
+            _, sino_condition = self.preprocess(condition=condition, condition_a_t=False)
+
+        if self.condition_A_T:
+            _, phan_condition = self.preprocess(condition=condition)
+            
         loss: torch.Tensor | None = None
         x_t: torch.Tensor | None = None
         target_pred: torch.Tensor | None = None
         t: torch.Tensor | None = None
 
         if not self.latent:
-            loss, x_t, target_pred, t = self.model.diffusion_process.p_loss(image, condition)
+            loss, x_t, target_pred, t = self.model.diffusion_process.p_loss(image, 
+                                                                            phan_condition if self.condition_A_T else sino_condition)
         else:
-            loss, x_t, target_pred, t = self.model.diffusion_process.training_step((condition, image), batch_idx=batch_idx)
+            loss, x_t, target_pred, t = self.model.diffusion_process.training_step((phan_condition if self.condition_A_T else sino_condition, 
+                                                                                    image), batch_idx=batch_idx)
 
         if self.physics and self.physics_model is not None:
             # Apply physics model to the loss
-            physics_loss_weight = 0.2  # Adjust the weight as needed
             physics_loss: torch.Tensor | None = None
             epoch_and_step: tuple | None = (self.current_epoch, self.global_step) if batch_idx == 0 else None
             if not self.latent:
-                physics_loss = self.physics_model(x_t, target_pred, t, condition, epoch_and_step=epoch_and_step)
+                physics_loss = self.physics_model(x_t, target_pred, t, sino_condition, epoch_and_step=epoch_and_step)
             else:
                 decoded_target_pred: torch.Tensor | None = None
                 with torch.no_grad():
                     decoded_target_pred = self.model.diffusion_process.ae.decode(target_pred) / self.model.diffusion_process.latent_scale_factor
-                physics_loss = self.physics_model(x_t, decoded_target_pred, t, condition, epoch_and_step=epoch_and_step)
-            loss += physics_loss * physics_loss_weight
+                physics_loss = self.physics_model(x_t, decoded_target_pred, t, sino_condition, epoch_and_step=epoch_and_step)
+            loss += physics_loss
 
         self.log('train_loss', loss, prog_bar=True)
 
@@ -192,6 +205,16 @@ class ECDiffusion(pl.LightningModule):
                         'train/global_step': self.global_step,
                     })
 
+        # Debugging output
+        if batch_idx == 0:
+            print(f'sino_condition shape: {sino_condition.shape if sino_condition is not None else None}')
+            print(f'phan_condition shape: {phan_condition.shape if phan_condition is not None else None}')
+            print(f'image shape: {image.shape}')
+            print(f'pred shape: {target_pred.shape if target_pred is not None else None}')
+            print(f'Min/max of sino_condition: {sino_condition.min().item() if sino_condition is not None else None} / {sino_condition.max().item() if sino_condition is not None else None}')
+            print(f'Min/max of phan_condition: {phan_condition.min().item() if phan_condition is not None else None} / {phan_condition.max().item() if phan_condition is not None else None}')
+            print(f'Min/max of image: {image.min().item()} / {image.max().item()}')
+            print(f'Min/max of pred: {target_pred.min().item() if target_pred is not None else None} / {target_pred.max().item() if target_pred is not None else None}')
         return loss
 
     def validation_step(self, batch, batch_idx):

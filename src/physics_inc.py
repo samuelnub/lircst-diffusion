@@ -2,10 +2,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ssim import SSIM
 from Diffusion.DenoisingDiffusionProcess.forward import GaussianForwardProcess
 import math
-from util import extract
+from util import extract, gaussian_log_likelihood, extract
 
 import matplotlib.pyplot as plt
 from IPython.display import display, clear_output
@@ -30,7 +29,7 @@ class PhysicsIncorporated(nn.Module):
 
         self.stochastic_proportion: float = 1/4 # Only use 1/nth of the batch to compute loss
 
-        self.loss_metric = SSIM(data_range=1.0, size_average=True, channel=1).cuda()  # Assuming single channel for sinogram
+        self.loss_metric = F.mse_loss
 
         self.image_width = 128
 
@@ -91,6 +90,8 @@ class PhysicsIncorporated(nn.Module):
 
     def forward(self, x_t: torch.Tensor, target_pred: torch.Tensor, t, y: torch.Tensor, epoch_and_step: tuple|None=None) -> torch.Tensor:
         # Apply forward operator to our predicted x_0 based on x_t and noise_hat, and calculate loss between the predicted and actual y.
+        # P.S. We assume y is noiseless and serves as a ground truth for the sinogram.
+        # TODO: If sinogram y is noisy, we should instead use our GT phantom and feed it through the forward operator to get the expected sinogram.
 
         # Stochastic sampling
         indices = torch.randperm(x_t.shape[0])[:math.floor(x_t.shape[0] * self.stochastic_proportion)]
@@ -122,8 +123,15 @@ class PhysicsIncorporated(nn.Module):
                 # Interpolate/resize the predicted sinogram to match the shape of y (we assume y has passed through the conditional encoder)
                 sino_pred_ut = F.interpolate(sino_pred_ut, size=y.shape[-2:], mode='bilinear', align_corners=False)
 
-                loss_ut = 1 - self.loss_metric((sino_pred_ut+1)/2, (y[i].unsqueeze(0)+1)/2) # (1-ssim) For SSIM, we need to scale the images to [0, 1] range
-                loss_total += loss_ut * (1/x_t.shape[0]) # Scale by batch size
+                loss_ut = self.loss_metric(sino_pred_ut, y[i].unsqueeze(0))
+                # Compute the gaussian log likelihood of loss_ut
+                # https://github.com/jhbastek/PhysicsInformedDiffusionModels/blob/main/src/denoising_toy_utils.py#L494
+                variance = extract(self.gfp.posterior_variance_clipped, t[i].unsqueeze(0), loss_ut.shape)
+                loss_ut_log_likelihood = gaussian_log_likelihood(torch.zeros_like(loss_ut), mean=loss_ut, var=variance)  # Assuming mean=0
+                residual_constant = 0.001
+                residual_ut = residual_constant * -1 * loss_ut_log_likelihood.mean() # Maximse the log likelihood, so we take the negative of it
+
+                loss_total += residual_ut * (1/x_t.shape[0]) # Scale by batch size
 
                 # debugging: plot predicted x_0 and sino_pred_ut and y
                 if epoch_and_step is not None and epoch_and_step[0] % 5 == 0 and i == indices[0]:  # Only plot for the first sample in the batch
@@ -145,7 +153,7 @@ class PhysicsIncorporated(nn.Module):
                     plt.axis('off')
 
                     plt.subplot(1, 4, 4)
-                    plt.title(f'Actual Sinogram (y), loss:{loss_ut.item():.4f}')
+                    plt.title(f'Actual Sinogram (y), loss:{loss_ut_log_likelihood.item():.4f}')
                     plt.imshow(y[i][0].detach().cpu().numpy(), cmap='gray')
                     plt.axis('off')
 

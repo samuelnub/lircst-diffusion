@@ -20,6 +20,12 @@ model_args = {
         "predict_mode": 'eps',  # Use eps prediction
         "condition_A_T": True,  # Use A_T for conditioning
     },
+    "ECD-Phys-CAT": {
+        "physics": True,  # Use physics-based loss
+        "latent": False,  # Don't use latent diffusion
+        "predict_mode": 'eps',  # Use eps prediction
+        "condition_A_T": True,  # Use A_T for conditioning
+    },
     "ECD-Phys": {
         "physics": True,  # Use physics-based loss
         "latent": False,  # Don't use latent diffusion
@@ -31,6 +37,18 @@ model_args = {
         "latent": False,  # Don't use latent diffusion
         "predict_mode": 'x0',
         "condition_A_T": False,
+    },
+    "ECLD-CAT": {
+        "physics": False,  # Don't use physics-based loss
+        "latent": True,  # Use latent diffusion
+        "predict_mode": 'eps',  # Use eps prediction
+        "condition_A_T": True,  # Use A_T for conditioning
+    },
+    "ECLD-Phys-CAT": {
+        "physics": True,  # Use physics-based loss
+        "latent": True,  # Use latent diffusion
+        "predict_mode": 'eps',  # Use eps prediction
+        "condition_A_T": True,  # Use A_T for conditioning
     },
     "ECLD-Phys": {
         "physics": True,  # Use physics-based loss
@@ -125,3 +143,18 @@ def sino_undersample(y: torch.Tensor, mask_proportion: float=0.2) -> torch.Tenso
     mask = mask.float().cuda()  # Convert mask to float for multiplication
 
     return y * mask  # Element-wise multiplication to apply the mask
+
+
+def gaussian_log_likelihood(x: torch.Tensor, mean: torch.Tensor, var: torch.Tensor, return_full: bool=False) -> torch.Tensor:
+    # https://github.com/jhbastek/PhysicsInformedDiffusionModels/blob/main/src/denoising_toy_utils.py#L372
+    centered_x = x - mean
+    squared_diffs = (centered_x ** 2) / var
+    if return_full:
+        log_likelihood = -0.5 * (squared_diffs + torch.log(var) + torch.log(2 * torch.pi)) # Full log likelihood with constant terms
+    else:
+        log_likelihood = -0.5 * squared_diffs
+
+    # avoid log(0)
+    log_likelihood = torch.clamp(log_likelihood, min=-27.6310211159)
+
+    return log_likelihood

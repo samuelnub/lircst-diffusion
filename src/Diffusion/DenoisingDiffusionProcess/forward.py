@@ -13,6 +13,7 @@ from torch import nn
 from .beta_schedules import *
 
 from util import beta_scheduler
+import torch.nn.functional as F
 
 
 class ForwardModel(nn.Module):
@@ -66,6 +67,15 @@ class GaussianForwardProcess(ForwardModel):
         self.register_buffer('alphas_cumprod_sqrt',self.alphas_cumprod.sqrt())
         self.register_buffer('alphas_one_minus_cumprod_sqrt',(1-self.alphas_cumprod).sqrt())
         self.register_buffer('alphas_sqrt',self.alphas.sqrt())
+
+        # ADDED: for Physics-informed Diffusion
+        self.register_buffer('alphas_cumprod_prev', F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0))
+        self.register_buffer('posterior_variance', 
+                             self.betas * (1 - self.alphas_cumprod_prev) / (1 - self.alphas_cumprod))
+        self.register_buffer('posterior_variance_clipped', self.posterior_variance.clone())
+        self.posterior_variance_clipped[0] = self.posterior_variance[1]
+        self.register_buffer('posterior_log_variance_clipped', 
+                             torch.log(self.posterior_variance_clipped))
      
     @torch.no_grad()
     def forward(self, x_0, t, return_noise=False):

@@ -118,20 +118,23 @@ class LatentDiffusionConditional(LatentDiffusion):
                  num_timesteps=1000,
                  latent_scale_factor=0.1,
                  batch_size=1,
-                 lr=1e-4):
+                 lr=1e-4,
+                 predict_mode='eps'):
         pl.LightningModule.__init__(self)
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
         self.lr = lr
         self.register_buffer('latent_scale_factor', torch.tensor(latent_scale_factor))
         self.batch_size=batch_size
+        self.predict_mode=predict_mode # 'x0' or 'eps'
         
         self.ae=AutoEncoder()
         with torch.no_grad():
             self.latent_dim=self.ae.encode(torch.ones(1,3,256,256)).shape[1]
         self.model=DenoisingDiffusionConditionalProcess(generated_channels=self.latent_dim,
                                                         condition_channels=self.latent_dim,
-                                                        num_timesteps=num_timesteps)
+                                                        num_timesteps=num_timesteps,
+                                                        predict_mode=self.predict_mode)
         
             
     @torch.no_grad()
