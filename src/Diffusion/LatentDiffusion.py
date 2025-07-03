@@ -119,14 +119,14 @@ class LatentDiffusionConditional(LatentDiffusion):
                  latent_scale_factor=0.1,
                  batch_size=1,
                  lr=1e-4,
-                 predict_mode='eps'):
+                 predict_mode='v'):
         pl.LightningModule.__init__(self)
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
         self.lr = lr
         self.register_buffer('latent_scale_factor', torch.tensor(latent_scale_factor))
         self.batch_size=batch_size
-        self.predict_mode=predict_mode # 'x0' or 'eps'
+        self.predict_mode=predict_mode # 'eps' or 'x0' or 'v'
         
         self.ae=AutoEncoder()
         with torch.no_grad():

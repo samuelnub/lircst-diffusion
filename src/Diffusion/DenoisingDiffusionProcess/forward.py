@@ -52,12 +52,14 @@ class GaussianForwardProcess(ForwardModel):
     
     def __init__(self,
                  num_timesteps=1000,
-                 schedule=beta_scheduler
+                 schedule=beta_scheduler,
+                 predict_mode='v'  # 'eps' or 'x0' or 'v'
                 ):
         
         super().__init__(num_timesteps=num_timesteps,
                          schedule=schedule
                         )
+        self.predict_mode = predict_mode  # 'eps' or 'x0' or 'v'
         
         # get process parameters
         self.register_buffer('betas',get_beta_schedule(self.schedule,self.num_timesteps))
@@ -68,6 +70,11 @@ class GaussianForwardProcess(ForwardModel):
         self.register_buffer('alphas_one_minus_cumprod_sqrt',(1-self.alphas_cumprod).sqrt())
         self.register_buffer('alphas_sqrt',self.alphas.sqrt())
 
+        # ADDED: for v-prediction
+        self.register_buffer('alphas_cumprod_recip_sqrt', torch.sqrt(1 / self.alphas_cumprod))
+        self.register_buffer('alphas_cumprod_minus_one_recip_sqrt', 
+                             torch.sqrt(1 / self.alphas_cumprod - 1))
+
         # ADDED: for Physics-informed Diffusion
         self.register_buffer('alphas_cumprod_prev', F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0))
         self.register_buffer('posterior_variance', 
@@ -76,6 +83,17 @@ class GaussianForwardProcess(ForwardModel):
         self.posterior_variance_clipped[0] = self.posterior_variance[1]
         self.register_buffer('posterior_log_variance_clipped', 
                              torch.log(self.posterior_variance_clipped))
+        
+        # ADDED: for Min-SNR weighted losses
+        snr = self.alphas_cumprod / (1 - self.alphas_cumprod)
+        min_snr_gamma = 5
+        snr_clamped = torch.clamp(snr.clone(), min=min_snr_gamma)
+        if self.predict_mode == 'eps':
+            self.register_buffer('loss_weight', snr_clamped / snr)
+        if self.predict_mode == 'x0':
+            self.register_buffer('loss_weight', snr_clamped)
+        if self.predict_mode == 'v':
+            self.register_buffer('loss_weight', snr_clamped / (snr + 1))
      
     @torch.no_grad()
     def forward(self, x_0, t, return_noise=False):

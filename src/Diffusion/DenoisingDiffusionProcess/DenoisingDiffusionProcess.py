@@ -7,6 +7,8 @@ from functools import partial
 import numpy as np
 from tqdm.auto import tqdm
 
+import matplotlib.pyplot as plt
+
 from .forward import *
 from .samplers import *
 from .backbones.unet_convnext import *
@@ -109,7 +111,7 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
                  schedule=beta_scheduler,
                  num_timesteps=1000,
                  sampler=None,
-                 predict_mode='eps'  # 'x0' or 'eps'
+                 predict_mode='v'  # 'eps' or 'x0' or 'v'
                 ):
         super().__init__()
         
@@ -118,7 +120,7 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
         self.condition_channels=condition_channels
         self.num_timesteps=num_timesteps
         self.loss_fn=loss_fn
-        self.predict_mode=predict_mode  # 'x0' or 'eps'
+        self.predict_mode=predict_mode  # 'eps' or 'x0' or 'v'
         
         # Forward Process
         self.forward_process=GaussianForwardProcess(num_timesteps=self.num_timesteps,
@@ -133,7 +135,7 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
         
         # defaults to a DDPM sampler if None is provided
         self.sampler=DDPM_Sampler(num_timesteps=self.num_timesteps) if sampler is None else sampler
-        
+
     @torch.no_grad()
     def forward(self,
                 condition,
@@ -162,7 +164,7 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
         it=reversed(range(0, num_timesteps))        
         
         x_t = torch.randn([b, self.generated_channels, h, w],device=device)
-                
+        
         for i in tqdm(it, desc='diffusion sampling', total=num_timesteps) if verbose else it:
             t = torch.full((b,), i, device=device, dtype=torch.long)
             model_input=torch.cat([x_t,condition],1).to(device)
@@ -173,7 +175,17 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
 
             if self.predict_mode == 'x0':
                 x_0_pred = self.model(model_input, t)  # prediction of x_0
-                noise_hat = (x_t - extract(self.forward_process.alphas_cumprod_sqrt, t, x_t.shape) * x_0_pred) / extract(self.forward_process.alphas_one_minus_cumprod_sqrt, t, x_t.shape)
+                noise_hat = (x_t - extract(self.forward_process.alphas_cumprod_sqrt, t, x_t.shape) * x_0_pred) \
+                            / extract(self.forward_process.alphas_one_minus_cumprod_sqrt, t, x_t.shape)
+                x_t = self.sampler(x_t, t, noise_hat)  # prediction of next state
+
+            if self.predict_mode == 'v':
+                # https://github.com/lucidrains/denoising-diffusion-pytorch/blob/main/denoising_diffusion_pytorch/denoising_diffusion_pytorch.py
+                v_pred = self.model(model_input, t)  # prediction of velocity
+                x_0_pred = (extract(self.forward_process.alphas_cumprod_sqrt, t, x_t.shape) * x_t ) \
+                            - (extract(self.forward_process.alphas_one_minus_cumprod_sqrt, t, x_t.shape) * v_pred)
+                noise_hat = (extract(self.forward_process.alphas_cumprod_recip_sqrt, t, x_t.shape) * x_t - x_0_pred) \
+                            / extract(self.forward_process.alphas_cumprod_minus_one_recip_sqrt, t, x_t.shape)
                 x_t = self.sampler(x_t, t, noise_hat)  # prediction of next state
 
         return x_t
@@ -201,6 +213,17 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
 
         if self.predict_mode == 'x0':
             target = output
+
+        if self.predict_mode == 'v':
+            # Compute velocity
+            target = (extract(self.forward_process.alphas_cumprod_sqrt, t, noise.shape) * noise) \
+                    - (extract(self.forward_process.alphas_one_minus_cumprod_sqrt, t, output.shape) * output)
             
         # apply loss
-        return self.loss_fn(target, target_pred), output_noisy, target_pred, t # ADDED: return noisy output and noise prediction and timestep for our physics model
+        loss: torch.Tensor = self.loss_fn(target, target_pred, reduction='none')
+        # Given loss of shape [b, ...]
+        mean_over = tuple(range(1, len(loss.shape)))  # mean over all dimensions except batch
+        loss = loss.mean(dim=mean_over)  # shape [b]
+        loss = loss * extract(self.forward_process.loss_weight, t, loss.shape)  # apply loss weight
+
+        return loss.mean(), output_noisy, target_pred, t # ADDED: return noisy output and noise prediction and timestep for our physics model

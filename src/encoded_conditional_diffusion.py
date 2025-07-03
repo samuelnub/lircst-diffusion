@@ -33,7 +33,7 @@ class ECDiffusion(pl.LightningModule):
                  lr=1e-4,
                  physics=False,
                  latent=False,
-                 predict_mode='eps',
+                 predict_mode='v',
                  condition_A_T=True):
         super().__init__()
         self.train_dataset = train_dataset
@@ -42,7 +42,7 @@ class ECDiffusion(pl.LightningModule):
         self.lr = lr
         self.batch_size = batch_size
         self.latent = latent
-        self.predict_mode = predict_mode  # 'eps' or 'x0'
+        self.predict_mode = predict_mode  # 'eps' or 'x0' or 'v'
         self.condition_A_T = condition_A_T  # Whether to pass our condition (sinogram) through the physics model
 
         self.image_shape = (2, 128, 128) if not self.latent else (3, 256, 256)  # 2 channels: scatter and attenuation
@@ -205,30 +205,20 @@ class ECDiffusion(pl.LightningModule):
                         'train/global_step': self.global_step,
                     })
 
-        # Debugging output
-        if batch_idx == 0:
-            print(f'sino_condition shape: {sino_condition.shape if sino_condition is not None else None}')
-            print(f'phan_condition shape: {phan_condition.shape if phan_condition is not None else None}')
-            print(f'image shape: {image.shape}')
-            print(f'pred shape: {target_pred.shape if target_pred is not None else None}')
-            print(f'Min/max of sino_condition: {sino_condition.min().item() if sino_condition is not None else None} / {sino_condition.max().item() if sino_condition is not None else None}')
-            print(f'Min/max of phan_condition: {phan_condition.min().item() if phan_condition is not None else None} / {phan_condition.max().item() if phan_condition is not None else None}')
-            print(f'Min/max of image: {image.min().item()} / {image.max().item()}')
-            print(f'Min/max of pred: {target_pred.min().item() if target_pred is not None else None} / {target_pred.max().item() if target_pred is not None else None}')
         return loss
 
     def validation_step(self, batch, batch_idx):
         # This will run every epoch, but we only want to evaluate the visual loss every n epochs
         eval_every_n_epochs = 10
-        fig_every_n_epochs = 4
+        fig_every_n_batches = 4
         if self.current_epoch > 0 and self.current_epoch % eval_every_n_epochs == 0:
             # Only evaluate visual loss every n epochs (computationally expensive)
-            return self.loss_evaluation(batch, batch_idx, to_print=True if batch_idx % fig_every_n_epochs == 0 else False)
+            return self.loss_evaluation(batch, batch_idx, to_print=True if batch_idx % fig_every_n_batches == 0 else False)
         return None
 
     def test_step(self, batch, batch_idx):
-        fig_every_n_epochs = 10
-        return self.loss_evaluation(batch, batch_idx, to_print=True if batch_idx % fig_every_n_epochs == 0 else False, is_test=True)
+        fig_every_n_batches = 10
+        return self.loss_evaluation(batch, batch_idx, to_print=True if batch_idx % fig_every_n_batches == 0 else False, is_test=True)
     
     def train_dataloader(self):
         return DataLoader(self.train_dataset,
@@ -375,7 +365,7 @@ class EncodedConditionalDiffusion(nn.Module):
         self.train_timesteps = num_timesteps
 
         self.latent = latent
-        self.predict_mode = predict_mode  # 'eps' or 'x0'
+        self.predict_mode = predict_mode  # 'eps' or 'x0' or 'v'
 
         self.diffusion_process = DenoisingDiffusionConditionalProcess(
             generated_channels=self.input_output_shape[0],

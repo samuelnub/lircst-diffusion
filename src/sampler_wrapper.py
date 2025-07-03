@@ -8,7 +8,7 @@ class SamplerWrapper():
         self.sample_timesteps = sample_timesteps
         self.train_timesteps = train_timesteps # TODO VVVVVVVV self.sample_timesteps is used for sampling
         self.sampler = DDIM_Sampler(num_timesteps=self.sample_timesteps, train_timesteps=self.train_timesteps)
-        # DDPM_Sampler(num_timesteps=self.train_timesteps)
+        # self.sampler = DDPM_Sampler(num_timesteps=self.train_timesteps)
         # 
 
 

@@ -25,7 +25,7 @@ class PhysicsIncorporated(nn.Module):
         self.A_ub: torch.Tensor | None = None
         self.A_tb: torch.Tensor | None = None
 
-        self.predict_mode: str = predict_mode  # 'eps' or 'x0'
+        self.predict_mode: str = predict_mode  # 'eps' or 'x0' or 'v'
 
         self.stochastic_proportion: float = 1/4 # Only use 1/nth of the batch to compute loss
 
@@ -110,6 +110,10 @@ class PhysicsIncorporated(nn.Module):
 
         if self.predict_mode == 'x0':
             x_0_pred: torch.Tensor = target_pred
+
+        if self.predict_mode == 'v':
+            x_0_pred: torch.Tensor = (extract(self.gfp.alphas_cumprod_sqrt, t, x_t.shape) * x_t ) \
+                                - (extract(self.gfp.alphas_one_minus_cumprod_sqrt, t, x_t.shape) * target_pred)
 
         for i in indices:
             # Apply the forward operator to x_0_pred

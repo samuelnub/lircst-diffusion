@@ -17,49 +17,49 @@ model_args = {
     "ECD-CAT": {
         "physics": False,  # Don't use physics-based loss
         "latent": False,  # Don't use latent diffusion
-        "predict_mode": 'eps',  # Use eps prediction
+        "predict_mode": 'v',  # Use eps prediction
         "condition_A_T": True,  # Use A_T for conditioning
     },
     "ECD-Phys-CAT": {
         "physics": True,  # Use physics-based loss
         "latent": False,  # Don't use latent diffusion
-        "predict_mode": 'eps',  # Use eps prediction
+        "predict_mode": 'v',  # Use eps prediction
         "condition_A_T": True,  # Use A_T for conditioning
     },
     "ECD-Phys": {
         "physics": True,  # Use physics-based loss
         "latent": False,  # Don't use latent diffusion
-        "predict_mode": 'x0',
+        "predict_mode": 'v',
         "condition_A_T": False,
     },
     "ECD": {
         "physics": False,  # Don't use physics-based loss
         "latent": False,  # Don't use latent diffusion
-        "predict_mode": 'x0',
+        "predict_mode": 'v',
         "condition_A_T": False,
     },
     "ECLD-CAT": {
         "physics": False,  # Don't use physics-based loss
         "latent": True,  # Use latent diffusion
-        "predict_mode": 'eps',  # Use eps prediction
+        "predict_mode": 'v',  # Use eps prediction
         "condition_A_T": True,  # Use A_T for conditioning
     },
     "ECLD-Phys-CAT": {
         "physics": True,  # Use physics-based loss
         "latent": True,  # Use latent diffusion
-        "predict_mode": 'eps',  # Use eps prediction
+        "predict_mode": 'v',  # Use eps prediction
         "condition_A_T": True,  # Use A_T for conditioning
     },
     "ECLD-Phys": {
         "physics": True,  # Use physics-based loss
         "latent": True,  # Use latent diffusion
-        "predict_mode": 'x0',
+        "predict_mode": 'v',
         "condition_A_T": False,
     },
     "ECLD": {
         "physics": False,  # Don't use physics-based loss
         "latent": True,  # Use latent diffusion
-        "predict_mode": 'x0',
+        "predict_mode": 'v',
         "condition_A_T": False,
     },
 }
