@@ -10,7 +10,7 @@ import numpy as np
 
 from sampler_wrapper import SamplerWrapper
 from physics_inc import PhysicsIncorporated
-from lircst_ana_dataset import LircstAnaDataset as Lad
+from data_compute import DataCompute as DC
 from util import sino_undersample, degradation, global_normalisation
 
 from torchmetrics.image import PeakSignalNoiseRatio as PSNR
@@ -60,16 +60,21 @@ class ECDiffusion(pl.LightningModule):
         self.sampler_wrapper = SamplerWrapper(sample_timesteps=self.model.sample_timesteps,
                                              train_timesteps=self.model.train_timesteps)
 
+        self.data_compute = DC(
+            data_dir='/home/samnub/dev/lircst-ana/data/',
+            operator_dir='/home/samnub/dev/lircst-iterecon/data_discretised/',
+        )
+
         self.physics = physics  # Whether to incorporate physics loss in the model
         self.physics_model: PhysicsIncorporated | None = PhysicsIncorporated(
             gaussian_forward_process=self.model.diffusion_process.forward_process if not self.latent else self.model.diffusion_process.model.forward_process,
-            A_ut_dir='/home/samnub/dev/lircst-iterecon/data_discretised/A_ut.npy',
+            data_compute=self.data_compute,
             predict_mode=self.predict_mode,
         ) # Necessary for all our configurations, even if physics=False
 
         self.metrics = {
-            'psnr': PSNR().cuda(),
-            'ssim': SSIM().cuda(),  
+            'psnr': PSNR(data_range=1.0).cuda(),
+            'ssim': SSIM(data_range=1.0).cuda(),  
             'mse': MSE().cuda(),
         }
         
@@ -100,10 +105,10 @@ class ECDiffusion(pl.LightningModule):
             sino = condition[i] if condition is not None else None
 
             if phan is not None:
-                min_phan0 = Lad.phan0_min if global_norm else torch.min(phan[0])
-                max_phan0 = Lad.phan0_max if global_norm else torch.max(phan[0])
-                min_phan1 = Lad.phan1_min if global_norm else torch.min(phan[1])
-                max_phan1 = Lad.phan1_max if global_norm else torch.max(phan[1])
+                min_phan0 = DC.phan0_min if global_norm else torch.min(phan[0])
+                max_phan0 = DC.phan0_max if global_norm else torch.max(phan[0])
+                min_phan1 = DC.phan1_min if global_norm else torch.min(phan[1])
+                max_phan1 = DC.phan1_max if global_norm else torch.max(phan[1])
                 phan[0] = ((phan[0] - min_phan0) / (max_phan0 - min_phan0)) * 2 - 1
                 phan[1] = ((phan[1] - min_phan1) / (max_phan1 - min_phan1)) * 2 - 1
 
@@ -122,13 +127,16 @@ class ECDiffusion(pl.LightningModule):
                 if degradation > 0:
                     sino = sino_undersample(sino.unsqueeze(0), degradation).squeeze(0)  # Apply degradation to the sinogram readings
 
+                min_sino = DC.sino_ut_min if global_norm else torch.min(sino)
+                max_sino = DC.sino_ut_max if global_norm else torch.max(sino)
+
                 if (condition_a_t is None and self.condition_A_T) or condition_a_t is True:
                     # Apply the pseudoinverse physics model to the sinogram
-                    sino = self.physics_model.A_T(sino.unsqueeze(0), 'ut').squeeze(0)
+                    sino = self.data_compute.A_T(sino.unsqueeze(0), 'ut').squeeze(0)
                     # P.S. Our "sino" is now a misnomer, it's actually in phantom space now
-
-                min_sino = torch.min(sino) # TODO: if global_norm, we have no precomputed min/max values
-                max_sino = torch.max(sino)
+                    # Recompute min and max for the phantom space
+                    min_sino = DC.sino_ut_a_t_min if global_norm else torch.min(sino)
+                    max_sino = DC.sino_ut_a_t_max if global_norm else torch.max(sino)
 
                 sino = ((sino - min_sino) / (max_sino - min_sino)) * 2 - 1
 
@@ -148,7 +156,7 @@ class ECDiffusion(pl.LightningModule):
     def forward(self, *args, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
         condition = args[0]
 
-        _, condition = self.preprocess(condition=condition)
+        _, condition = self.preprocess(condition=condition, global_norm=global_normalisation)
         pred = self.model.diffusion_process(condition, self.sampler_wrapper.get_sampler(), *args[2:], **kwargs)  
 
         return pred, condition
@@ -159,13 +167,13 @@ class ECDiffusion(pl.LightningModule):
         sino_condition: torch.Tensor | None = None # Used if condition_A_T is false OR we have physics true
         phan_condition: torch.Tensor | None = None # If condition_A_T is true
 
-        image, _ = self.preprocess(image=image)  # Preprocess the image (GT phantom)
+        image, _ = self.preprocess(image=image, global_norm=global_normalisation)  # Preprocess the image (GT phantom)
 
         if (not self.condition_A_T) or self.physics:
-            _, sino_condition = self.preprocess(condition=condition, condition_a_t=False)
+            _, sino_condition = self.preprocess(condition=condition, condition_a_t=False, global_norm=global_normalisation)
 
         if self.condition_A_T:
-            _, phan_condition = self.preprocess(condition=condition)
+            _, phan_condition = self.preprocess(condition=condition, global_norm=global_normalisation)
             
         loss: torch.Tensor | None = None
         x_t: torch.Tensor | None = None
@@ -245,12 +253,12 @@ class ECDiffusion(pl.LightningModule):
     def loss_evaluation(self, batch, batch_idx, to_print=False, return_pred=False, is_test=False):
         image, condition, phantom_id = batch
 
-        image, _ = self.preprocess(image=image) # Don't double-preprocess the condition
+        image, _ = self.preprocess(image=image, global_norm=global_normalisation) # Don't double-preprocess the condition
 
         pred, encoded_condition = self.forward(condition)
 
         # Pre-process our prediction so that it's within [-1, 1] range
-        pred, _ = self.preprocess(image=pred)
+        # pred, _ = self.preprocess(image=pred, global_norm=False) # Don't double-preprocess the prediction
 
         # If dimensions are not the same, resize the prediction to match the image
         if pred.shape != image.shape:
@@ -258,6 +266,9 @@ class ECDiffusion(pl.LightningModule):
 
         # Rescale the images to [0, 1] range for PSNR and SSIM calculations
         pred = ((pred + 1) / 2)
+        # Clamp our prediction to [0, 1] range
+        pred = torch.clamp(pred, 0, 1)
+
         image = ((image + 1) / 2)
 
         psnr_scat: float = 0
@@ -311,22 +322,27 @@ class ECDiffusion(pl.LightningModule):
             plt.subplot(1, 5, 1)
             plt.title(f'{phantom_id[0]}')
             plt.imshow(encoded_condition[0, 0].detach().cpu().numpy(), cmap='gray')
+            plt.colorbar(orientation='horizontal')
             plt.axis('off')
             plt.subplot(1, 5, 2)
             plt.title(f'(PSNR:{psnr_scat.item():.2f}, SSIM:{ssim_scat.item():.2f}, RMSE:{rmse_scat.item():.2f})')
             plt.imshow(pred[0, 0].detach().cpu().numpy(), cmap='gray')
+            plt.colorbar(orientation='horizontal')
             plt.axis('off')
             plt.subplot(1, 5, 3)
             plt.title(f'Scat')
             plt.imshow(image[0, 0].detach().cpu().numpy(), cmap='gray')
+            plt.colorbar(orientation='horizontal')
             plt.axis('off')
             plt.subplot(1, 5, 4)
             plt.title(f'(PSNR:{psnr_atten.item():.2f}, SSIM:{ssim_atten.item():.2f}, RMSE:{rmse_atten.item():.2f})')
             plt.imshow(pred[0, -1].detach().cpu().numpy(), cmap='gray')
+            plt.colorbar(orientation='horizontal')
             plt.axis('off')
             plt.subplot(1, 5, 5)
             plt.title(f'Atten')
             plt.imshow(image[0, -1].detach().cpu().numpy(), cmap='gray')
+            plt.colorbar(orientation='horizontal')
             plt.axis('off')
             plt.tight_layout()
 
@@ -361,7 +377,7 @@ class EncodedConditionalDiffusion(nn.Module):
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
 
-        self.sample_timesteps = num_timesteps // 5
+        self.sample_timesteps = 1000 # TODO num_timesteps // 5
         self.train_timesteps = num_timesteps
 
         self.latent = latent

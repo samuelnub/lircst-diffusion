@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from Diffusion.DenoisingDiffusionProcess.forward import GaussianForwardProcess
 import math
+from data_compute import DataCompute as DC
 from util import extract, gaussian_log_likelihood, extract
 
 import matplotlib.pyplot as plt
@@ -14,16 +15,12 @@ import wandb
 class PhysicsIncorporated(nn.Module):
     def __init__(self, 
                  gaussian_forward_process: GaussianForwardProcess,
-                 A_ut_dir: str | None = None,
-                 A_ub_dir: str | None = None,
-                 A_tb_dir: str | None = None,
+                 data_compute: DC,
                  predict_mode: str = 'eps'):
         super(PhysicsIncorporated, self).__init__()
         self.gfp: GaussianForwardProcess = gaussian_forward_process
 
-        self.A_ut: torch.Tensor | None = None
-        self.A_ub: torch.Tensor | None = None
-        self.A_tb: torch.Tensor | None = None
+        self.data_compute = data_compute
 
         self.predict_mode: str = predict_mode  # 'eps' or 'x0' or 'v'
 
@@ -33,60 +30,6 @@ class PhysicsIncorporated(nn.Module):
 
         self.image_width = 128
 
-        # Load the forward operator matrices from the specified directory
-        if A_ut_dir is not None:
-            self.A_ut = torch.from_numpy(np.load(A_ut_dir)).float().cuda()
-            self.A_ut_T = self.A_ut.T  # Precompute the transpose for efficiency
-        if A_ub_dir is not None:
-            self.A_ub = torch.from_numpy(np.load(A_ub_dir)).float().cuda()
-            self.A_ub_T = self.A_ub.T  # Precompute the transpose for efficiency
-        if A_tb_dir is not None:
-            self.A_tb = torch.from_numpy(np.load(A_tb_dir)).float().cuda()
-            self.A_tb_T = self.A_tb.T  # Precompute the transpose for efficiency
-
-    def A(self, x: torch.Tensor, operator: str) -> torch.Tensor:
-        """
-        Apply the specified forward operator to the input tensor x.
-        """
-        y: torch.Tensor | None = None
-
-        A_matrix: torch.Tensor | None = None
-        if operator == 'ut':
-            A_matrix = self.A_ut
-        elif operator == 'ub':
-            A_matrix = self.A_ub
-        elif operator == 'tb':
-            A_matrix = self.A_tb
-
-        for i in range(x.shape[0]):
-            y_i = (A_matrix @ x[i].sum(dim=-3).view(-1)).view(1, 1, x.shape[-2], -1)
-            if y is None:
-                y = y_i
-            else:
-                y = torch.cat((y, y_i), dim=0)
-        return y
-    
-    def A_T(self, y: torch.Tensor, operator: str) -> torch.Tensor:
-        """
-        Apply the transpose of the specified forward operator to the input tensor y.
-        """
-        x: torch.Tensor | None = None
-
-        A_T_matrix: torch.Tensor | None = None
-        if operator == 'ut':
-            A_T_matrix = self.A_ut_T
-        elif operator == 'ub':
-            A_T_matrix = self.A_ub_T
-        elif operator == 'tb':
-            A_T_matrix = self.A_tb_T
-
-        for i in range(y.shape[0]):
-            x_i = (A_T_matrix @ y[i].sum(dim=-3).view(-1)).view(1, 1, y.shape[-2], -1)
-            if x is None:
-                x = x_i
-            else:
-                x = torch.cat((x, x_i), dim=0)
-        return x
 
     def forward(self, x_t: torch.Tensor, target_pred: torch.Tensor, t, y: torch.Tensor, epoch_and_step: tuple|None=None) -> torch.Tensor:
         # Apply forward operator to our predicted x_0 based on x_t and noise_hat, and calculate loss between the predicted and actual y.
@@ -117,8 +60,8 @@ class PhysicsIncorporated(nn.Module):
 
         for i in indices:
             # Apply the forward operator to x_0_pred
-            if self.A_ut is not None:
-                sino_pred_ut = self.A(x_0_pred[i].unsqueeze(0), 'ut')  # Apply the forward operator
+            if self.data_compute.A_ut is not None:
+                sino_pred_ut = self.data_compute.A(x_0_pred[i].unsqueeze(0), 'ut')  # Apply the forward operator
                 # Scale predicted sinogram to the same range as y
                 sino_pred_ut_min = sino_pred_ut.min()
                 sino_pred_ut_max = sino_pred_ut.max()
@@ -132,7 +75,7 @@ class PhysicsIncorporated(nn.Module):
                 # https://github.com/jhbastek/PhysicsInformedDiffusionModels/blob/main/src/denoising_toy_utils.py#L494
                 variance = extract(self.gfp.posterior_variance_clipped, t[i].unsqueeze(0), loss_ut.shape)
                 loss_ut_log_likelihood = gaussian_log_likelihood(torch.zeros_like(loss_ut), mean=loss_ut, var=variance)  # Assuming mean=0
-                residual_constant = 0.001
+                residual_constant = 0.002 # Original PDIM paper used 0.001
                 residual_ut = residual_constant * -1 * loss_ut_log_likelihood.mean() # Maximse the log likelihood, so we take the negative of it
 
                 loss_total += residual_ut * (1/x_t.shape[0]) # Scale by batch size
@@ -141,24 +84,29 @@ class PhysicsIncorporated(nn.Module):
                 if epoch_and_step is not None and epoch_and_step[0] % 5 == 0 and i == indices[0]:  # Only plot for the first sample in the batch
 
                     plt.figure(figsize=(12, 6))
+                    
                     plt.subplot(1, 4, 1)
                     plt.title(f'Predicted x_0 (scat) (i:{i})')
                     plt.imshow(x_0_pred[i][0].detach().cpu().numpy(), cmap='gray')
+                    plt.colorbar(orientation='horizontal')
                     plt.axis('off')
 
                     plt.subplot(1, 4, 2)
                     plt.title(f'Predicted x_0 (atten) (t:{t[i].item()})')
                     plt.imshow(x_0_pred[i][1].detach().cpu().numpy(), cmap='gray')
+                    plt.colorbar(orientation='horizontal')
                     plt.axis('off')
 
                     plt.subplot(1, 4, 3)
                     plt.title('Predicted Sinogram')
                     plt.imshow(sino_pred_ut[0][0].detach().cpu().numpy(), cmap='gray')
+                    plt.colorbar(orientation='horizontal')
                     plt.axis('off')
 
                     plt.subplot(1, 4, 4)
                     plt.title(f'Actual Sinogram (y), loss:{loss_ut_log_likelihood.item():.4f}')
                     plt.imshow(y[i][0].detach().cpu().numpy(), cmap='gray')
+                    plt.colorbar(orientation='horizontal')
                     plt.axis('off')
 
                     plt.tight_layout()
