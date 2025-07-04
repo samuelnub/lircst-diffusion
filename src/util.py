@@ -12,7 +12,8 @@ beta_scheduler = 'cosine'
 degradation: float = 0.0
 global_normalisation: bool = True  # Use global normalization for the dataset
 
-# TODO: transition to script not notebook
+models_dir = '/home/samnub/dev/lircst-diffusion/models/'
+
 model_args = {
     "ECD-CAT": {
         "physics": False,  # Don't use physics-based loss
@@ -81,12 +82,12 @@ def get_dataset():
 
 def generate_directory_name(model_name, preexisting: str|None=None):
     timestamp = int(time.time())
-    return f"../models/{model_name}/{timestamp if preexisting is None else preexisting}/", timestamp
+    return f"{models_dir}{model_name}/{timestamp if preexisting is None else preexisting}/", timestamp
 
 
 def get_latest_ckpt(model_name, latest_dir: str|None=None):
     try:
-        model_dir = f"../models/{model_name}/"
+        model_dir = f"{models_dir}{model_name}/"
         if not os.path.exists(model_dir):
             return None, None
         directories = [d for d in os.listdir(model_dir) if os.path.isdir(os.path.join(model_dir, d))]

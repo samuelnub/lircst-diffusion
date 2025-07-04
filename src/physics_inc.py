@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from Diffusion.DenoisingDiffusionProcess.forward import GaussianForwardProcess
 import math
 from data_compute import DataCompute as DC
-from util import extract, gaussian_log_likelihood, extract
+from util import extract, gaussian_log_likelihood, extract, global_normalisation
 
 import matplotlib.pyplot as plt
 from IPython.display import display, clear_output
@@ -61,10 +61,19 @@ class PhysicsIncorporated(nn.Module):
         for i in indices:
             # Apply the forward operator to x_0_pred
             if self.data_compute.A_ut is not None:
+                # De-normalise x_0_pred to the original range of the phantom data
+                phan0_min = self.data_compute.phan0_min if global_normalisation else x_0_pred[i, 0, :, :].min()
+                phan0_max = self.data_compute.phan0_max if global_normalisation else x_0_pred[i, 0, :, :].max()
+                phan1_min = self.data_compute.phan1_min if global_normalisation else x_0_pred[i, 1, :, :].min()
+                phan1_max = self.data_compute.phan1_max if global_normalisation else x_0_pred[i, 1, :, :].max()
+
+                x_0_pred[i, 0, :, :] = ((x_0_pred[i, 0, :, :] + 1) / 2) * (phan0_max - phan0_min) + phan0_min
+                x_0_pred[i, 1, :, :] = ((x_0_pred[i, 1, :, :] + 1) / 2) * (phan1_max - phan1_min) + phan1_min
+
                 sino_pred_ut = self.data_compute.A(x_0_pred[i].unsqueeze(0), 'ut')  # Apply the forward operator
                 # Scale predicted sinogram to the same range as y
-                sino_pred_ut_min = sino_pred_ut.min()
-                sino_pred_ut_max = sino_pred_ut.max()
+                sino_pred_ut_min = self.data_compute.sino_ut_min if global_normalisation else sino_pred_ut.min()
+                sino_pred_ut_max = self.data_compute.sino_ut_max if global_normalisation else sino_pred_ut.max()
                 sino_pred_ut = (sino_pred_ut - sino_pred_ut_min) / (sino_pred_ut_max - sino_pred_ut_min) * 2 - 1
 
                 # Interpolate/resize the predicted sinogram to match the shape of y (we assume y has passed through the conditional encoder)

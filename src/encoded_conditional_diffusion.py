@@ -61,6 +61,7 @@ class ECDiffusion(pl.LightningModule):
                                              train_timesteps=self.model.train_timesteps)
 
         self.data_compute = DC(
+            stats_dir='/home/samnub/dev/lircst-diffusion/data/',
             data_dir='/home/samnub/dev/lircst-ana/data/',
             operator_dir='/home/samnub/dev/lircst-iterecon/data_discretised/',
         )
@@ -70,7 +71,7 @@ class ECDiffusion(pl.LightningModule):
             gaussian_forward_process=self.model.diffusion_process.forward_process if not self.latent else self.model.diffusion_process.model.forward_process,
             data_compute=self.data_compute,
             predict_mode=self.predict_mode,
-        ) # Necessary for all our configurations, even if physics=False
+        )
 
         self.metrics = {
             'psnr': PSNR(data_range=1.0).cuda(),
@@ -260,7 +261,6 @@ class ECDiffusion(pl.LightningModule):
         # Pre-process our prediction so that it's within [-1, 1] range
         # pred, _ = self.preprocess(image=pred, global_norm=False) # Don't double-preprocess the prediction
 
-        # If dimensions are not the same, resize the prediction to match the image
         if pred.shape != image.shape:
             pred = F.interpolate(pred, size=image.shape[-1], mode='bilinear', align_corners=False)
 
@@ -317,7 +317,6 @@ class ECDiffusion(pl.LightningModule):
 
         if to_print:
             # Display the prediction and the ground truth for first item in batch
-
             plt.figure(figsize=(12, 6))
             plt.subplot(1, 5, 1)
             plt.title(f'{phantom_id[0]}')
@@ -377,7 +376,7 @@ class EncodedConditionalDiffusion(nn.Module):
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
 
-        self.sample_timesteps = 1000 # TODO num_timesteps // 5
+        self.sample_timesteps = num_timesteps // 5
         self.train_timesteps = num_timesteps
 
         self.latent = latent

@@ -37,9 +37,9 @@ class DataCompute():
     sino_ut_a_t_max: float | None = None
 
     
-    def __init__(self, data_dir: str, operator_dir: str):
+    def __init__(self, stats_dir: str, data_dir: str, operator_dir: str):
+        self.stats_dir = stats_dir
         self.data_dir = data_dir
-        self.stats_dir = '../data/'
         self.operator_dir = operator_dir
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
