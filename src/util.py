@@ -1,6 +1,7 @@
 import os
 import time
 
+import numpy as np
 import torch
 from torch.utils.data import *
 from lircst_ana_dataset import LircstAnaDataset
@@ -119,14 +120,44 @@ def extract(a, t, x_shape):
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 
 
-def poisson_noise(x: torch.Tensor, noise_factor=0.1):
+def poisson_noise(x: torch.Tensor, noise_factor=0.1, clamp=True, scale: float=1e5):
     """
     Add Poisson noise to the input tensor x.
     """
-    # TODO: Make sure x is non-negative, as Poisson noise is defined for non-negative values
+    # Make sure x is non-negative, as Poisson noise is defined for non-negative values
 
-    noise = torch.poisson(x * noise_factor) / noise_factor
-    return x + noise - x.mean(dim=(1, 2, 3), keepdim=True)  # Center the noise around zero
+    x_clean_min = x.min()
+    x_clean_max = x.max()
+
+    noise_factor = noise_factor * scale # For our sinograms which usually range in 1e-5, we need a big factor
+
+    lam = x * noise_factor  # Lambda parameter for Poisson distribution
+    noisy = torch.poisson(lam) / noise_factor  # Generate Poisson noise
+
+    if clamp:
+        # Clamp the noisy tensor to the range of the original tensor
+        noisy = torch.clamp(noisy, min=x_clean_min, max=x_clean_max)  
+
+    return noisy
+
+
+def gaussian_noise(x: torch.Tensor, noise_factor=0.1, clamp=True, scale: float=1e-4):
+    """
+    Add Gaussian noise to the input tensor x.
+    """
+    # Make sure x is non-negative, as Gaussian noise can be negative
+    x_clean_min = x.min()
+    x_clean_max = x.max()
+
+    noise = torch.randn_like(x) * noise_factor * scale # Generate Gaussian noise
+
+    noisy = x + noise  # Add noise to the original tensor
+
+    if clamp:
+        # Clamp the noisy tensor to the range of the original tensor
+        noisy = torch.clamp(noisy, min=x_clean_min, max=x_clean_max)
+
+    return noisy
 
 
 def sino_undersample(y: torch.Tensor, mask_proportion: float=0.2) -> torch.Tensor:

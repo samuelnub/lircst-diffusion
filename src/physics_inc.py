@@ -84,7 +84,7 @@ class PhysicsIncorporated(nn.Module):
                 # https://github.com/jhbastek/PhysicsInformedDiffusionModels/blob/main/src/denoising_toy_utils.py#L494
                 variance = extract(self.gfp.posterior_variance_clipped, t[i].unsqueeze(0), loss_ut.shape)
                 loss_ut_log_likelihood = gaussian_log_likelihood(torch.zeros_like(loss_ut), mean=loss_ut, var=variance)  # Assuming mean=0
-                residual_constant = 0.002 # Original PDIM paper used 0.001
+                residual_constant = 0.005 # Original PDIM paper used 0.001
                 residual_ut = residual_constant * -1 * loss_ut_log_likelihood.mean() # Maximse the log likelihood, so we take the negative of it
 
                 loss_total += residual_ut * (1/x_t.shape[0]) # Scale by batch size

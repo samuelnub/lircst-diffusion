@@ -11,7 +11,7 @@ import numpy as np
 from sampler_wrapper import SamplerWrapper
 from physics_inc import PhysicsIncorporated
 from data_compute import DataCompute as DC
-from util import sino_undersample, degradation, global_normalisation
+from util import sino_undersample, poisson_noise, gaussian_noise, degradation, global_normalisation
 
 from torchmetrics.image import PeakSignalNoiseRatio as PSNR
 from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
@@ -127,6 +127,8 @@ class ECDiffusion(pl.LightningModule):
                 # Degradation is applied to the sinogram readings
                 if degradation > 0:
                     sino = sino_undersample(sino.unsqueeze(0), degradation).squeeze(0)  # Apply degradation to the sinogram readings
+                    sino = poisson_noise(sino.unsqueeze(0), noise_factor=degradation, scale=10000/DC.sino_ut_mean).squeeze(0)  # Add Poisson noise to the sinogram readings
+                    sino = gaussian_noise(sino.unsqueeze(0), noise_factor=degradation, scale=DC.sino_ut_std).squeeze(0)  # Add Gaussian noise to the sinogram readings
 
                 min_sino = DC.sino_ut_min if global_norm else torch.min(sino)
                 max_sino = DC.sino_ut_max if global_norm else torch.max(sino)
@@ -376,7 +378,7 @@ class EncodedConditionalDiffusion(nn.Module):
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
 
-        self.sample_timesteps = num_timesteps // 5
+        self.sample_timesteps = num_timesteps# // 5
         self.train_timesteps = num_timesteps
 
         self.latent = latent
