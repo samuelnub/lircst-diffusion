@@ -57,7 +57,7 @@ def train():
                 accelerator='gpu',
                 devices=[0],
                 num_sanity_val_steps=0,  # Disable sanity check on dataloader
-                limit_val_batches=16, # Limit validation batches for faster training
+                limit_val_batches=8, # Limit validation batches for faster training
                 default_root_dir=default_root_dir,
             )
             

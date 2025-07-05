@@ -160,7 +160,8 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
             sampler.to(device)
 
         # time steps list
-        num_timesteps=sampler.num_timesteps 
+        # We want the full number of timesteps, aka what the model trained on
+        num_timesteps=sampler.num_timesteps if not hasattr(sampler, 'train_timesteps') else sampler.train_timesteps
         it=reversed(range(0, num_timesteps))        
         
         x_t = torch.randn([b, self.generated_channels, h, w],device=device)

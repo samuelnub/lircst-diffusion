@@ -219,7 +219,7 @@ class ECDiffusion(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         # This will run every epoch, but we only want to evaluate the visual loss every n epochs
         eval_every_n_epochs = 10
-        fig_every_n_batches = 4
+        fig_every_n_batches = 2
         if self.current_epoch > 0 and self.current_epoch % eval_every_n_epochs == 0:
             # Only evaluate visual loss every n epochs (computationally expensive)
             return self.loss_evaluation(batch, batch_idx, to_print=True if batch_idx % fig_every_n_batches == 0 else False)
@@ -324,7 +324,7 @@ class ECDiffusion(pl.LightningModule):
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
             plt.subplot(1, 5, 2)
-            plt.title(f'(PSNR:{psnr_scat.item():.2f}, SSIM:{ssim_scat.item():.2f}, RMSE:{rmse_scat.item():.2f})')
+            plt.title(f'(PSNR:{psnr_scat.item():.3f}, SSIM:{ssim_scat.item():.3f}, RMSE:{rmse_scat.item():.3f})')
             plt.imshow(pred[0, 0].detach().cpu().numpy(), cmap='gray')
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
@@ -334,7 +334,7 @@ class ECDiffusion(pl.LightningModule):
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
             plt.subplot(1, 5, 4)
-            plt.title(f'(PSNR:{psnr_atten.item():.2f}, SSIM:{ssim_atten.item():.2f}, RMSE:{rmse_atten.item():.2f})')
+            plt.title(f'(PSNR:{psnr_atten.item():.3f}, SSIM:{ssim_atten.item():.3f}, RMSE:{rmse_atten.item():.3f})')
             plt.imshow(pred[0, -1].detach().cpu().numpy(), cmap='gray')
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
