@@ -15,20 +15,6 @@ global_normalisation: bool = True  # Use global normalization for the dataset
 models_dir = '/home/samnub/dev/lircst-diffusion/models/'
 
 model_args = {
-    "ECD-Phys-CAT": {
-        "physics": True,
-        "latent": False,
-        "predict_mode": 'v',
-        "condition_A_T": True,
-        "degradation": 0.0,
-    },
-    "ECD-CAT": {
-        "physics": False,
-        "latent": False,
-        "predict_mode": 'v',
-        "condition_A_T": True,
-        "degradation": 0.0,
-    },
     "ECD-Phys-CAT-D20": {
         "physics": True,
         "latent": False,
@@ -42,6 +28,20 @@ model_args = {
         "predict_mode": 'v',
         "condition_A_T": True,
         "degradation": 0.2,
+    },
+    "ECD-Phys-CAT": {
+        "physics": True,
+        "latent": False,
+        "predict_mode": 'v',
+        "condition_A_T": True,
+        "degradation": 0.0,
+    },
+    "ECD-CAT": {
+        "physics": False,
+        "latent": False,
+        "predict_mode": 'v',
+        "condition_A_T": True,
+        "degradation": 0.0,
     },
     "ECD": {  # The original ECD model without CAT
         "physics": False,

@@ -160,13 +160,15 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
             sampler.to(device)
 
         # time steps list
-        # We want the full number of timesteps, aka what the model trained on
         num_timesteps=sampler.num_timesteps if not hasattr(sampler, 'train_timesteps') else sampler.train_timesteps
-        it=reversed(range(0, num_timesteps))        
-        
+        it=reversed(range(0, 
+                          num_timesteps if not hasattr(sampler, 'train_timesteps') else sampler.train_timesteps, 
+                          1 if not hasattr(sampler, 'ratio') else sampler.ratio))       
+
         x_t = torch.randn([b, self.generated_channels, h, w],device=device)
         
         for i in tqdm(it, desc='diffusion sampling', total=num_timesteps) if verbose else it:
+            i = i + (0 if not hasattr(sampler, 'ratio') else sampler.ratio -1)  # adjust for DDIM ratio to move up to max timesteps-1
             t = torch.full((b,), i, device=device, dtype=torch.long)
             model_input=torch.cat([x_t,condition],1).to(device)
 

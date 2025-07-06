@@ -58,9 +58,12 @@ class ECDiffusion(pl.LightningModule):
             latent=self.latent,
             predict_mode=self.predict_mode
         )
-
         self.sampler_wrapper = SamplerWrapper(sample_timesteps=self.model.sample_timesteps,
                                              train_timesteps=self.model.train_timesteps)
+        if not self.latent:
+            self.model.diffusion_process.sampler = self.sampler_wrapper.get_sampler()
+        else:
+            self.model.diffusion_process.model.sampler = self.sampler_wrapper.get_sampler()
 
         self.data_compute = DC(
             stats_dir='/home/samnub/dev/lircst-diffusion/data/',
@@ -91,7 +94,7 @@ class ECDiffusion(pl.LightningModule):
                    global_norm: bool=False, 
                    condition_perm: bool=True, 
                    condition_a_t: bool=None,
-                   log_snr: bool=False):
+                   ):
         # Pre-process our phantom images and conditions (no need for a separate conditional encoder here)
 
         image_out: torch.Tensor | None = None if image is None else torch.zeros((
@@ -134,15 +137,16 @@ class ECDiffusion(pl.LightningModule):
 
                 # Degradation is applied to the sinogram readings
                 if self.degradation > 0:
-                    sino_og = sino.clone() if log_snr else None # Keep the original sinogram for noise calculations
+                    sino_og = sino.clone() if (wandb.run is not None and wandb.run.step % 10 == 0) else None # Keep the original sinogram for noise calculations
                     sino = sino_undersample(sino.unsqueeze(0), self.degradation).squeeze(0)  # Apply degradation to the sinogram readings
                     sino = poisson_noise(sino.unsqueeze(0), noise_factor=self.degradation, scale=10000/DC.sino_ut_mean).squeeze(0)  # Add Poisson noise to the sinogram readings
                     sino = gaussian_noise(sino.unsqueeze(0), noise_factor=self.degradation, scale=DC.sino_ut_std).squeeze(0)  # Add Gaussian noise to the sinogram readings
-                    if log_snr:
+                    if wandb.run is not None and wandb.run.step % 10 == 0:
                         # Calculate SNR in dB
                         snr = snr_db(sino_og, sino)
-                        if wandb.run is not None and wandb.run.step % 20 == 0:
-                            wandb.log({'data/degradation_snr': snr})
+                        psnr = PSNR()(sino_og.unsqueeze(0), sino.unsqueeze(0)).item()
+                        wandb.log({'data/degradation_snr': snr,
+                                   'data/degradation_psnr': psnr,})
 
                 min_sino = DC.sino_ut_min if global_norm else torch.min(sino)
                 max_sino = DC.sino_ut_max if global_norm else torch.max(sino)
@@ -174,7 +178,7 @@ class ECDiffusion(pl.LightningModule):
         condition = args[0]
 
         _, condition = self.preprocess(condition=condition, global_norm=global_normalisation)
-        pred = self.model.diffusion_process(condition, self.sampler_wrapper.get_sampler(), *args[2:], **kwargs)  
+        pred = self.model.diffusion_process(condition, *args[2:], **kwargs)  
 
         return pred, condition
     
@@ -393,7 +397,7 @@ class EncodedConditionalDiffusion(nn.Module):
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
 
-        self.sample_timesteps = num_timesteps // 5
+        self.sample_timesteps = num_timesteps // 10  # 100 steps with eta=1 seems to be the sweet spot
         self.train_timesteps = num_timesteps
 
         self.latent = latent
