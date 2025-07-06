@@ -63,9 +63,8 @@ def train():
                 accelerator='gpu',
                 devices=[0],
                 num_sanity_val_steps=0,  # Disable sanity check on dataloader
-                limit_val_batches=16, # Limit validation batches for faster training
+                limit_val_batches=4, # Limit validation batches for faster training
                 default_root_dir=default_root_dir,
-                limit_train_batches=20, # TODO
             )
             
             trainer.fit(model, ckpt_path=get_latest_ckpt(name)[0] if pre_load else None)
