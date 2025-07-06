@@ -31,10 +31,9 @@ class PhysicsIncorporated(nn.Module):
         self.image_width = 128
 
 
-    def forward(self, x_t: torch.Tensor, target_pred: torch.Tensor, t, y: torch.Tensor, epoch_and_step: tuple|None=None) -> torch.Tensor:
+    def forward(self, x_t: torch.Tensor, target_pred: torch.Tensor, t, gt: torch.Tensor, epoch_and_step: tuple|None=None) -> torch.Tensor:
         # Apply forward operator to our predicted x_0 based on x_t and noise_hat, and calculate loss between the predicted and actual y.
-        # P.S. We assume y is noiseless and serves as a ground truth for the sinogram.
-        # TODO: If sinogram y is noisy, we should instead use our GT phantom and feed it through the forward operator to get the expected sinogram.
+        # P.S. GT phantom must be raw values, not normalised to any range.
 
         # Stochastic sampling
         indices = torch.randperm(x_t.shape[0])[:math.floor(x_t.shape[0] * self.stochastic_proportion)]
@@ -44,9 +43,8 @@ class PhysicsIncorporated(nn.Module):
             x_t = F.interpolate(x_t, size=(self.image_width, self.image_width), mode='bilinear', align_corners=False)
         if target_pred.shape[-1] != self.image_width:
             target_pred = F.interpolate(target_pred, size=(self.image_width, self.image_width), mode='bilinear', align_corners=False)
-        if y.shape[-1] != self.image_width:
-            y = F.interpolate(y, size=(self.image_width, self.image_width), mode='bilinear', align_corners=False)
-            y = y.mean(dim=1, keepdim=True)  # Assuming y is a single channel sinogram
+        if gt.shape[-1] != self.image_width:
+            gt = F.interpolate(gt, size=(self.image_width, self.image_width), mode='bilinear', align_corners=False)
 
         if self.predict_mode == 'eps':
             x_0_pred: torch.Tensor = (x_t - extract(self.gfp.alphas_one_minus_cumprod_sqrt, t, x_t.shape) * target_pred) / extract(self.gfp.alphas_cumprod_sqrt, t, x_t.shape)
@@ -62,24 +60,31 @@ class PhysicsIncorporated(nn.Module):
             # Apply the forward operator to x_0_pred
             if self.data_compute.A_ut is not None:
                 # De-normalise x_0_pred to the original range of the phantom data
-                phan0_min = self.data_compute.phan0_min if global_normalisation else x_0_pred[i, 0, :, :].min()
-                phan0_max = self.data_compute.phan0_max if global_normalisation else x_0_pred[i, 0, :, :].max()
-                phan1_min = self.data_compute.phan1_min if global_normalisation else x_0_pred[i, 1, :, :].min()
-                phan1_max = self.data_compute.phan1_max if global_normalisation else x_0_pred[i, 1, :, :].max()
+                phan0_min = DC.phan0_min if global_normalisation else x_0_pred[i, 0, :, :].min()
+                phan0_max = DC.phan0_max if global_normalisation else x_0_pred[i, 0, :, :].max()
+                phan1_min = DC.phan1_min if global_normalisation else x_0_pred[i, 1, :, :].min()
+                phan1_max = DC.phan1_max if global_normalisation else x_0_pred[i, 1, :, :].max()
 
                 x_0_pred[i, 0, :, :] = ((x_0_pred[i, 0, :, :] + 1) / 2) * (phan0_max - phan0_min) + phan0_min
                 x_0_pred[i, 1, :, :] = ((x_0_pred[i, 1, :, :] + 1) / 2) * (phan1_max - phan1_min) + phan1_min
 
-                sino_pred_ut = self.data_compute.A(x_0_pred[i].unsqueeze(0), 'ut')  # Apply the forward operator
-                # Scale predicted sinogram to the same range as y
-                sino_pred_ut_min = self.data_compute.sino_ut_min if global_normalisation else sino_pred_ut.min()
-                sino_pred_ut_max = self.data_compute.sino_ut_max if global_normalisation else sino_pred_ut.max()
+                sino_pred_ut = self.data_compute.A(x_0_pred[i].unsqueeze(0), 'ut')  # Apply the forward operator (all channels)
+                # Scale predicted sinogram to the same range as GT later
+                sino_pred_ut_min = DC.sino_ut_min if global_normalisation else sino_pred_ut.min()
+                sino_pred_ut_max = DC.sino_ut_max if global_normalisation else sino_pred_ut.max()
                 sino_pred_ut = (sino_pred_ut - sino_pred_ut_min) / (sino_pred_ut_max - sino_pred_ut_min) * 2 - 1
 
-                # Interpolate/resize the predicted sinogram to match the shape of y (we assume y has passed through the conditional encoder)
-                sino_pred_ut = F.interpolate(sino_pred_ut, size=y.shape[-2:], mode='bilinear', align_corners=False)
+                # Feed the GT phantom through the forward operator to get the expected sinogram
+                sino_gt_ut = self.data_compute.A(gt[i].unsqueeze(0), 'ut')  # Apply the forward operator to GT (all channels)
+                # Scale GT sinogram to the same range as predicted
+                sino_gt_ut_min = DC.sino_ut_min if global_normalisation else sino_gt_ut.min()
+                sino_gt_ut_max = DC.sino_ut_max if global_normalisation else sino_gt_ut.max()
+                sino_gt_ut = (sino_gt_ut - sino_gt_ut_min) / (sino_gt_ut_max - sino_gt_ut_min) * 2 - 1
 
-                loss_ut = self.loss_metric(sino_pred_ut, y[i].unsqueeze(0))
+                if sino_gt_ut.shape[-2:] != sino_pred_ut.shape[-2:]:
+                    sino_pred_ut = F.interpolate(sino_pred_ut, size=sino_gt_ut.shape[-2:], mode='bilinear', align_corners=False)
+
+                loss_ut = self.loss_metric(sino_pred_ut, sino_gt_ut)
                 # Compute the gaussian log likelihood of loss_ut
                 # https://github.com/jhbastek/PhysicsInformedDiffusionModels/blob/main/src/denoising_toy_utils.py#L494
                 variance = extract(self.gfp.posterior_variance_clipped, t[i].unsqueeze(0), loss_ut.shape)
@@ -113,8 +118,8 @@ class PhysicsIncorporated(nn.Module):
                     plt.axis('off')
 
                     plt.subplot(1, 4, 4)
-                    plt.title(f'Actual Sinogram (y), loss:{loss_ut_log_likelihood.item():.4f}')
-                    plt.imshow(y[i][0].detach().cpu().numpy(), cmap='gray')
+                    plt.title(f'Sinogram from GT, loss:{loss_ut_log_likelihood.item():.4f}')
+                    plt.imshow(sino_gt_ut[0][0].detach().cpu().numpy(), cmap='gray')
                     plt.colorbar(orientation='horizontal')
                     plt.axis('off')
 

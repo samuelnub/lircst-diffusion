@@ -7,6 +7,7 @@ from encoded_conditional_diffusion import ECDiffusion
 from util import generate_directory_name, get_latest_ckpt, model_args, get_dataset
 
 # Setup Diffusion modules
+import torch
 import pytorch_lightning as pl
 from Diffusion.EMA import EMA
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -17,6 +18,7 @@ train_mode: bool = True
 test_afterward: bool = True
 
 dataset_train, dataset_val, dataset_test = get_dataset()
+
 
 def train():
     for name, model_arg in model_args.items():
@@ -51,13 +53,14 @@ def train():
             wandb.define_metric("test/rmse_atten", summary="mean")
 
             trainer = pl.Trainer(
+                #detect_anomaly=True, # Enable anomaly detection for debugging
                 max_epochs=200,
                 max_steps=2e5,
                 callbacks=[EMA(0.9999)],
                 accelerator='gpu',
                 devices=[0],
                 num_sanity_val_steps=0,  # Disable sanity check on dataloader
-                limit_val_batches=8, # Limit validation batches for faster training
+                limit_val_batches=16, # Limit validation batches for faster training
                 default_root_dir=default_root_dir,
             )
             

@@ -11,7 +11,7 @@ import numpy as np
 from sampler_wrapper import SamplerWrapper
 from physics_inc import PhysicsIncorporated
 from data_compute import DataCompute as DC
-from util import sino_undersample, poisson_noise, gaussian_noise, degradation, global_normalisation
+from util import sino_undersample, poisson_noise, gaussian_noise, snr_db, to_decibels, global_normalisation
 
 from torchmetrics.image import PeakSignalNoiseRatio as PSNR
 from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
@@ -34,7 +34,8 @@ class ECDiffusion(pl.LightningModule):
                  physics=False,
                  latent=False,
                  predict_mode='v',
-                 condition_A_T=True):
+                 condition_A_T=True,
+                 degradation=0.0):
         super().__init__()
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
@@ -44,6 +45,7 @@ class ECDiffusion(pl.LightningModule):
         self.latent = latent
         self.predict_mode = predict_mode  # 'eps' or 'x0' or 'v'
         self.condition_A_T = condition_A_T  # Whether to pass our condition (sinogram) through the physics model
+        self.degradation = degradation  # Self sabotaging Degradation factor for the sinogram readings
 
         self.image_shape = (2, 128, 128) if not self.latent else (3, 256, 256)  # 2 channels: scatter and attenuation
 
@@ -83,7 +85,13 @@ class ECDiffusion(pl.LightningModule):
         print(f'Loading checkpoint: epoch {checkpoint["epoch"]} | step {checkpoint["global_step"]}')
         return super().on_load_checkpoint(checkpoint)
 
-    def preprocess(self, image: torch.Tensor | None=None, condition: torch.Tensor | None=None, global_norm: bool=False, condition_perm: bool=True, condition_a_t: bool=None):
+    def preprocess(self, 
+                   image: torch.Tensor | None=None, 
+                   condition: torch.Tensor | None=None, 
+                   global_norm: bool=False, 
+                   condition_perm: bool=True, 
+                   condition_a_t: bool=None,
+                   log_snr: bool=False):
         # Pre-process our phantom images and conditions (no need for a separate conditional encoder here)
 
         image_out: torch.Tensor | None = None if image is None else torch.zeros((
@@ -125,10 +133,16 @@ class ECDiffusion(pl.LightningModule):
                     sino = sino.permute(2, 0, 1)  # Change to (C, H, W) format
 
                 # Degradation is applied to the sinogram readings
-                if degradation > 0:
-                    sino = sino_undersample(sino.unsqueeze(0), degradation).squeeze(0)  # Apply degradation to the sinogram readings
-                    sino = poisson_noise(sino.unsqueeze(0), noise_factor=degradation, scale=10000/DC.sino_ut_mean).squeeze(0)  # Add Poisson noise to the sinogram readings
-                    sino = gaussian_noise(sino.unsqueeze(0), noise_factor=degradation, scale=DC.sino_ut_std).squeeze(0)  # Add Gaussian noise to the sinogram readings
+                if self.degradation > 0:
+                    sino_og = sino.clone() if log_snr else None # Keep the original sinogram for noise calculations
+                    sino = sino_undersample(sino.unsqueeze(0), self.degradation).squeeze(0)  # Apply degradation to the sinogram readings
+                    sino = poisson_noise(sino.unsqueeze(0), noise_factor=self.degradation, scale=10000/DC.sino_ut_mean).squeeze(0)  # Add Poisson noise to the sinogram readings
+                    sino = gaussian_noise(sino.unsqueeze(0), noise_factor=self.degradation, scale=DC.sino_ut_std).squeeze(0)  # Add Gaussian noise to the sinogram readings
+                    if log_snr:
+                        # Calculate SNR in dB
+                        snr = snr_db(sino_og, sino)
+                        if wandb.run is not None and wandb.run.step % 20 == 0:
+                            wandb.log({'data/degradation_snr': snr})
 
                 min_sino = DC.sino_ut_min if global_norm else torch.min(sino)
                 max_sino = DC.sino_ut_max if global_norm else torch.max(sino)
@@ -167,14 +181,15 @@ class ECDiffusion(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         image, condition, phantom_id = batch
 
+        image_raw: torch.Tensor | None = image.clone() if self.physics else None
+
         sino_condition: torch.Tensor | None = None # Used if condition_A_T is false OR we have physics true
         phan_condition: torch.Tensor | None = None # If condition_A_T is true
 
         image, _ = self.preprocess(image=image, global_norm=global_normalisation)  # Preprocess the image (GT phantom)
 
-        if (not self.condition_A_T) or self.physics:
+        if not self.condition_A_T:
             _, sino_condition = self.preprocess(condition=condition, condition_a_t=False, global_norm=global_normalisation)
-
         if self.condition_A_T:
             _, phan_condition = self.preprocess(condition=condition, global_norm=global_normalisation)
             
@@ -195,12 +210,12 @@ class ECDiffusion(pl.LightningModule):
             physics_loss: torch.Tensor | None = None
             epoch_and_step: tuple | None = (self.current_epoch, self.global_step) if batch_idx == 0 else None
             if not self.latent:
-                physics_loss = self.physics_model(x_t, target_pred, t, sino_condition, epoch_and_step=epoch_and_step)
+                physics_loss = self.physics_model(x_t, target_pred, t, image_raw, epoch_and_step=epoch_and_step)
             else:
                 decoded_target_pred: torch.Tensor | None = None
                 with torch.no_grad():
                     decoded_target_pred = self.model.diffusion_process.ae.decode(target_pred) / self.model.diffusion_process.latent_scale_factor
-                physics_loss = self.physics_model(x_t, decoded_target_pred, t, sino_condition, epoch_and_step=epoch_and_step)
+                physics_loss = self.physics_model(x_t, decoded_target_pred, t, image_raw, epoch_and_step=epoch_and_step)
             loss += physics_loss
 
         self.log('train_loss', loss, prog_bar=True)
@@ -221,7 +236,7 @@ class ECDiffusion(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         # This will run every epoch, but we only want to evaluate the visual loss every n epochs
         eval_every_n_epochs = 10
-        fig_every_n_batches = 2
+        fig_every_n_batches = 4
         if self.current_epoch > 0 and self.current_epoch % eval_every_n_epochs == 0:
             # Only evaluate visual loss every n epochs (computationally expensive)
             return self.loss_evaluation(batch, batch_idx, to_print=True if batch_idx % fig_every_n_batches == 0 else False)
@@ -270,7 +285,7 @@ class ECDiffusion(pl.LightningModule):
         pred = ((pred + 1) / 2)
         # Clamp our prediction to [0, 1] range
         pred = torch.clamp(pred, 0, 1)
-
+        
         image = ((image + 1) / 2)
 
         psnr_scat: float = 0
@@ -378,7 +393,7 @@ class EncodedConditionalDiffusion(nn.Module):
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
 
-        self.sample_timesteps = num_timesteps# // 5
+        self.sample_timesteps = num_timesteps // 5
         self.train_timesteps = num_timesteps
 
         self.latent = latent

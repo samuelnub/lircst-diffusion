@@ -10,59 +10,45 @@ from torch import Generator
 
 beta_scheduler = 'cosine'
 
-degradation: float = 0.0
 global_normalisation: bool = True  # Use global normalization for the dataset
 
 models_dir = '/home/samnub/dev/lircst-diffusion/models/'
 
 model_args = {
-    "ECD-CAT": {
-        "physics": False,  # Don't use physics-based loss
-        "latent": False,  # Don't use latent diffusion
-        "predict_mode": 'v',  # Use eps prediction
-        "condition_A_T": True,  # Use A_T for conditioning
-    },
     "ECD-Phys-CAT": {
-        "physics": True,  # Use physics-based loss
-        "latent": False,  # Don't use latent diffusion
-        "predict_mode": 'v',  # Use eps prediction
-        "condition_A_T": True,  # Use A_T for conditioning
+        "physics": True,
+        "latent": False,
+        "predict_mode": 'v',
+        "condition_A_T": True,
+        "degradation": 0.0,
     },
-    "ECD-Phys": {
-        "physics": True,  # Use physics-based loss
-        "latent": False,  # Don't use latent diffusion
+    "ECD-CAT": {
+        "physics": False,
+        "latent": False,
+        "predict_mode": 'v',
+        "condition_A_T": True,
+        "degradation": 0.0,
+    },
+    "ECD-Phys-CAT-D20": {
+        "physics": True,
+        "latent": False,
+        "predict_mode": 'v',
+        "condition_A_T": True,
+        "degradation": 0.2,
+    },
+    "ECD-CAT-D20": {
+        "physics": False,
+        "latent": False,
+        "predict_mode": 'v',
+        "condition_A_T": True,
+        "degradation": 0.2,
+    },
+    "ECD": {  # The original ECD model without CAT
+        "physics": False,
+        "latent": False,
         "predict_mode": 'v',
         "condition_A_T": False,
-    },
-    "ECD": {
-        "physics": False,  # Don't use physics-based loss
-        "latent": False,  # Don't use latent diffusion
-        "predict_mode": 'v',
-        "condition_A_T": False,
-    },
-    "ECLD-CAT": {
-        "physics": False,  # Don't use physics-based loss
-        "latent": True,  # Use latent diffusion
-        "predict_mode": 'v',  # Use eps prediction
-        "condition_A_T": True,  # Use A_T for conditioning
-    },
-    "ECLD-Phys-CAT": {
-        "physics": True,  # Use physics-based loss
-        "latent": True,  # Use latent diffusion
-        "predict_mode": 'v',  # Use eps prediction
-        "condition_A_T": True,  # Use A_T for conditioning
-    },
-    "ECLD-Phys": {
-        "physics": True,  # Use physics-based loss
-        "latent": True,  # Use latent diffusion
-        "predict_mode": 'v',
-        "condition_A_T": False,
-    },
-    "ECLD": {
-        "physics": False,  # Don't use physics-based loss
-        "latent": True,  # Use latent diffusion
-        "predict_mode": 'v',
-        "condition_A_T": False,
+        "degradation": 0.0,
     },
 }
 
@@ -123,6 +109,7 @@ def extract(a, t, x_shape):
 def poisson_noise(x: torch.Tensor, noise_factor=0.1, clamp=True, scale: float=1e5):
     """
     Add Poisson noise to the input tensor x.
+    As we are adding it to raw sinogram (before further transformations down the road), it does not need to be log-poisson.
     """
     # Make sure x is non-negative, as Poisson noise is defined for non-negative values
 
@@ -190,3 +177,26 @@ def gaussian_log_likelihood(x: torch.Tensor, mean: torch.Tensor, var: torch.Tens
     log_likelihood = torch.clamp(log_likelihood, min=-27.6310211159)
 
     return log_likelihood
+
+
+def snr_db(signal: torch.Tensor, noisy: torch.Tensor) -> float:
+    """
+    Calculate the SNR in dB.
+    https://en.wikipedia.org/wiki/Signal-to-noise_ratio
+    We use mu/sigma SNR calculation, which is common in image processing (as our mean is not zero centred).
+    """
+    noise = noisy - signal  # Calculate noise by subtracting the original signal from the noisy signal
+    noise = noise.std()
+    if noise == 0:
+        return float('inf')  # If noise is zero, SNR is infinite
+    snr = signal.mean() / noise  # Calculate SNR as the ratio of the mean signal to the standard deviation of the noise
+    snr_db_value = to_decibels(snr)  # Convert SNR to decibels
+    return snr_db_value.item()
+
+def to_decibels(value: float) -> float:
+    """
+    Convert a linear value to decibels (amplitude).
+    """
+    if value <= 0:
+        raise ValueError("Value must be positive to convert to decibels.")
+    return 20 * torch.log10(value)

@@ -74,6 +74,7 @@ class DataCompute():
     def A(self, x: torch.Tensor, operator: str) -> torch.Tensor:
         """
         Apply the specified forward operator to the input tensor x.
+        Returns it as B, C, H, W tensor.
         """
         y: torch.Tensor | None = None
 
@@ -86,7 +87,7 @@ class DataCompute():
             A_matrix = self.A_tb
 
         for i in range(x.shape[0]):
-            y_i = (A_matrix @ x[i].sum(dim=-3).view(-1)).view(1, 1, x.shape[-2], -1)
+            y_i = (A_matrix @ x[i].mean(dim=-3).view(-1)).view(1, 1, x.shape[-2], -1)
             if y is None:
                 y = y_i
             else:
@@ -96,6 +97,7 @@ class DataCompute():
     def A_T(self, y: torch.Tensor, operator: str) -> torch.Tensor:
         """
         Apply the transpose of the specified forward operator to the input tensor y.
+        Returns it as B, C, H, W tensor.
         """
         x: torch.Tensor | None = None
 
@@ -108,7 +110,7 @@ class DataCompute():
             A_T_matrix = self.A_tb_T
 
         for i in range(y.shape[0]):
-            x_i = (A_T_matrix @ y[i].sum(dim=-3).view(-1)).view(1, 1, y.shape[-2], -1)
+            x_i = (A_T_matrix @ y[i].mean(dim=-3).view(-1)).view(1, 1, y.shape[-2], -1)
             if x is None:
                 x = x_i
             else:
