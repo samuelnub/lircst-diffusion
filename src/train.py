@@ -52,6 +52,9 @@ def train():
             wandb.define_metric("test/ssim_atten", summary="mean")
             wandb.define_metric("test/rmse_atten", summary="mean")
 
+            wandb.define_metric("data/degradation_snr", summary="mean")
+            wandb.define_metric("data/degradation_psnr", summary="mean")
+
             trainer = pl.Trainer(
                 #detect_anomaly=True, # Enable anomaly detection for debugging
                 max_epochs=200,
@@ -62,6 +65,7 @@ def train():
                 num_sanity_val_steps=0,  # Disable sanity check on dataloader
                 limit_val_batches=16, # Limit validation batches for faster training
                 default_root_dir=default_root_dir,
+                limit_train_batches=20, # TODO
             )
             
             trainer.fit(model, ckpt_path=get_latest_ckpt(name)[0] if pre_load else None)

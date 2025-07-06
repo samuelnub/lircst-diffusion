@@ -40,11 +40,8 @@ class DDIM_Sampler(nn.Module):
         self.register_buffer('alphas_sqrt_recip',1/(self.alphas_sqrt))
 
         # ADDED because the original code is broken
-        #self.register_buffer('alphas_cumprod_prev', F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0))
-        #self.register_buffer('alphas_cumprod_prev_sqrt', self.alphas_cumprod_prev.sqrt())
-        
-        self.alphas_cumprod_prev = F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0).cuda()
-        self.alphas_cumprod_prev_sqrt = self.alphas_cumprod_prev.sqrt().cuda()
+        self.register_buffer('alphas_cumprod_prev', F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0))
+        self.register_buffer('alphas_cumprod_prev_sqrt', self.alphas_cumprod_prev.sqrt())
 
     @torch.no_grad()
     def forward(self,*args,**kwargs):   
@@ -68,7 +65,7 @@ class DDIM_Sampler(nn.Module):
         # parameters        
         alpha_cumprod_prev = self.alphas_cumprod[t_prev].where(t_prev.ge(0), self.final_alpha_cumprod.to(device)) # >= 0
         alpha_cumprod_prev = alpha_cumprod_prev.view(b,1,1,1)
-        alpha_cumprod_prev_sqrt = self.alphas_cumprod_prev_sqrt[t_prev]
+        alpha_cumprod_prev_sqrt = self.alphas_cumprod_prev_sqrt[t_prev].view(b,1,1,1)
         
         # estimate origin
         x_0_pred=self.estimate_origin(x_t,t,z_t)
@@ -97,5 +94,5 @@ class DDIM_Sampler(nn.Module):
     
     def estimate_origin(self,x_t,t,z_t):
         alpha_cumprod = self.alphas_cumprod[t].view(x_t.shape[0],1,1,1)
-        alpha_one_minus_cumprod_sqrt=self.alphas_one_minus_cumprod_sqrt[t]
+        alpha_one_minus_cumprod_sqrt=self.alphas_one_minus_cumprod_sqrt[t].view(x_t.shape[0],1,1,1)
         return(x_t-alpha_one_minus_cumprod_sqrt*z_t)/alpha_cumprod.sqrt()

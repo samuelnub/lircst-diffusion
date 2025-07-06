@@ -144,7 +144,7 @@ class ECDiffusion(pl.LightningModule):
                     if wandb.run is not None and wandb.run.step % 10 == 0:
                         # Calculate SNR in dB
                         snr = snr_db(sino_og, sino)
-                        psnr = PSNR()(sino_og.unsqueeze(0), sino.unsqueeze(0)).item()
+                        psnr = PSNR().cuda()(sino_og.unsqueeze(0), sino.unsqueeze(0)).item()
                         wandb.log({'data/degradation_snr': snr,
                                    'data/degradation_psnr': psnr,})
 
@@ -241,7 +241,7 @@ class ECDiffusion(pl.LightningModule):
         # This will run every epoch, but we only want to evaluate the visual loss every n epochs
         eval_every_n_epochs = 10
         fig_every_n_batches = 4
-        if self.current_epoch > 0 and self.current_epoch % eval_every_n_epochs == 0:
+        if self.current_epoch % eval_every_n_epochs == 0:
             # Only evaluate visual loss every n epochs (computationally expensive)
             return self.loss_evaluation(batch, batch_idx, to_print=True if batch_idx % fig_every_n_batches == 0 else False)
         return None
