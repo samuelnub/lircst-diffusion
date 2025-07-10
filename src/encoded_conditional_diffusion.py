@@ -11,7 +11,7 @@ import numpy as np
 from sampler_wrapper import SamplerWrapper
 from physics_inc import PhysicsIncorporated
 from data_compute import DataCompute as DC
-from util import sino_undersample, poisson_noise, gaussian_noise, snr_db, to_decibels, global_normalisation
+from util import sino_undersample, poisson_noise, gaussian_noise, snr_db, to_decibels, global_normalisation, mlem
 
 from torchmetrics.image import PeakSignalNoiseRatio as PSNR
 from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
@@ -295,14 +295,26 @@ class ECDiffusion(pl.LightningModule):
 
         image, _ = self.preprocess(image=image, global_norm=global_normalisation) # Don't double-preprocess the condition
 
-        pred, encoded_condition, precat = self.forward(condition)
 
-        # Pre-process our prediction so that it's within [-1, 1] range
-        # pred, _ = self.preprocess(image=pred, global_norm=False) # Don't double-preprocess the prediction
+        pred, encoded_condition, precat = self.forward(condition) # Learned prediction is assumed to be in [-1, 1] range
 
-        #pred = self.data_compute.A_T(condition.permute(0,3,1,2).sum(dim=-3,keepdim=True), 'ut')
-        
-        #pred = ((pred - DC.sino_ut_a_t_min) / (DC.sino_ut_a_t_max - DC.sino_ut_a_t_min)) * 2 - 1
+        classical: bool = False
+        if classical:
+            encoded_condition: torch.Tensor = torch.zeros((condition.shape[0], 1, *self.image_shape[-2:])).cuda() if not self.latent else torch.zeros((condition.shape[0], 3, *self.image_shape[-2:])).cuda()
+            precat: torch.Tensor = torch.zeros((condition.shape[0], 1, condition.shape[-3], condition.shape[-2])).cuda() if not self.latent else torch.zeros((condition.shape[0], 3, condition.shape[-3], condition.shape[-2])).cuda()
+            pred: torch.Tensor = torch.zeros((condition.shape[0], *self.image_shape)).cuda()  # Initialize prediction tensor
+            for i in range(condition.shape[0]):
+                to_feed = condition[i].permute(2,0,1).sum(dim=-3,keepdim=False).cuda()
+                if self.degradation > 0:
+                    to_feed = sino_undersample(to_feed.unsqueeze(0).unsqueeze(0), self.degradation).squeeze(0).squeeze(0)
+                    to_feed = poisson_noise(to_feed.unsqueeze(0).unsqueeze(0), noise_factor=self.degradation, scale=10000/DC.sino_ut_mean).squeeze(0).squeeze(0)
+                    to_feed = gaussian_noise(to_feed.unsqueeze(0).unsqueeze(0), noise_factor=self.degradation, scale=DC.sino_ut_std).squeeze(0).squeeze(0)
+                precat[i] = to_feed.unsqueeze(0).clone()
+                pred[i] = mlem(to_feed, 'ut', self.data_compute,)
+
+            # pred = self.data_compute.A_T(condition.permute(0,3,1,2).sum(dim=-3,keepdim=True), 'ut')
+            pred = ((pred - DC.phan0_min) / (DC.phan0_max - DC.phan0_min)) * 2 - 1
+
 
         if pred.shape != image.shape:
             pred = F.interpolate(pred, size=image.shape[-1], mode='bilinear', align_corners=False)
@@ -317,32 +329,26 @@ class ECDiffusion(pl.LightningModule):
         psnr_scat: float = 0
         ssim_scat: float = 0
         rmse_scat: float = 0
-        mae_scat: torch.Tensor | None = None
 
         psnr_atten: float = 0
         ssim_atten: float = 0
         rmse_atten: float = 0
-        mae_atten: torch.Tensor | None = None
 
         psnr_scat = self.metrics['psnr'](pred[:, 0, :, :].unsqueeze(1), image[:, 0, :, :].unsqueeze(1))
         ssim_scat = self.metrics['ssim'](pred[:, 0, :, :].unsqueeze(1), image[:, 0, :, :].unsqueeze(1))
         rmse_scat = torch.sqrt(self.metrics['mse'](pred[:, 0, :, :].reshape(-1), image[:, 0, :, :].reshape(-1)))
-        mae_scat = self.metrics['mae'](pred[:, 0, :, :].unsqueeze(1), image[:, 0, :, :].unsqueeze(1))
 
         psnr_atten = self.metrics['psnr'](pred[:, -1, :, :].unsqueeze(1), image[:, -1, :, :].unsqueeze(1))
         ssim_atten = self.metrics['ssim'](pred[:, -1, :, :].unsqueeze(1), image[:, -1, :, :].unsqueeze(1))
         rmse_atten = torch.sqrt(self.metrics['mse'](pred[:, -1, :, :].reshape(-1), image[:, -1, :, :].reshape(-1)))
-        mae_atten = self.metrics['mae'](pred[:, -1, :, :].unsqueeze(1), image[:, -1, :, :].unsqueeze(1))
 
         self.log('psnr_scat', psnr_scat, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
         self.log('ssim_scat', ssim_scat, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
         self.log('rmse_scat', rmse_scat, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
-        self.log('mae_scat', mae_scat.mean(), prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
 
         self.log('psnr_atten', psnr_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
         self.log('ssim_atten', ssim_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
         self.log('rmse_atten', rmse_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
-        self.log('mae_atten', mae_atten.mean(), prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
 
         if wandb.run is not None:
             if not is_test:
@@ -350,67 +356,53 @@ class ECDiffusion(pl.LightningModule):
                     'val/psnr_scat': psnr_scat.item(),
                     'val/ssim_scat': ssim_scat.item(),
                     'val/rmse_scat': rmse_scat.item(),
-                    'val/mae_scat': mae_scat.mean().item(),
                     'val/psnr_atten': psnr_atten.item(),
                     'val/ssim_atten': ssim_atten.item(),
                     'val/rmse_atten': rmse_atten.item(),
-                    'val/mae_atten': mae_atten.mean().item(),
                 })
             if is_test:
                 wandb.log({
                     'test/psnr_scat': psnr_scat.item(),
                     'test/ssim_scat': ssim_scat.item(),
                     'test/rmse_scat': rmse_scat.item(),
-                    'test/mae_scat': mae_scat.mean().item(),
                     'test/psnr_atten': psnr_atten.item(),
                     'test/ssim_atten': ssim_atten.item(),
                     'test/rmse_atten': rmse_atten.item(),
-                    'test/mae_atten': mae_atten.mean().item(),
                 })
 
         if to_print:
             # Display the prediction and the ground truth for first item in batch
             plt.figure(figsize=(20, 6))
-            plt.subplot(1, 8, 1)
+            plt.subplot(1, 6, 1)
             plt.title(f'{phantom_id[0]}')
             plt.imshow(precat[0, 0].detach().cpu().numpy(), cmap='gray')
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
-            plt.subplot(1, 8, 2)
+            plt.subplot(1, 6, 2)
             plt.title(f'Condition')
             plt.imshow(encoded_condition[0, 0].detach().cpu().numpy(), cmap='gray')
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
-            plt.subplot(1, 8, 3)
+            plt.subplot(1, 6, 3)
             plt.title(f'(PSNR:{psnr_scat.item():.3f}, SSIM:{ssim_scat.item():.3f}, RMSE:{rmse_scat.item():.3f})')
             plt.imshow(pred[0, 0].detach().cpu().numpy(), cmap='gray')
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
-            plt.subplot(1, 8, 4)
+            plt.subplot(1, 6, 4)
             plt.title(f'Scat')
             plt.imshow(image[0, 0].detach().cpu().numpy(), cmap='gray')
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
-            plt.subplot(1, 8, 5)
+            plt.subplot(1, 6, 5)
             plt.title(f'(PSNR:{psnr_atten.item():.3f}, SSIM:{ssim_atten.item():.3f}, RMSE:{rmse_atten.item():.3f})')
             plt.imshow(pred[0, -1].detach().cpu().numpy(), cmap='gray')
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
-            plt.subplot(1, 8, 6)
+            plt.subplot(1, 6, 6)
             plt.title(f'Atten')
             plt.imshow(image[0, -1].detach().cpu().numpy(), cmap='gray')
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
-            plt.subplot(1, 8, 7)
-            plt.title(f'Scat MAE {mae_scat.mean().item():.3f}')
-            plt.imshow(mae_scat[0, 0].detach().cpu().numpy(), cmap='magma', vmin=0, vmax=0.2)
-            plt.colorbar(orientation='horizontal')
-            plt.axis('off')
-            plt.subplot(1, 8, 8)
-            plt.title(f'Atten MAE {mae_atten.mean().item():.3f}')
-            plt.imshow(mae_atten[0, 0].detach().cpu().numpy(), cmap='magma', vmin=0, vmax=0.2)
-            plt.colorbar(orientation='horizontal')
-            plt.axis('off') # TODO: absolute scale
             plt.tight_layout()
 
             fig = plt.gcf()

@@ -233,16 +233,16 @@ def mlem(y: torch.Tensor,
     # Perform Maximum Likelihood Expectation Maximization (MLEM) algorithm
     # On our measured sinogram y.
     assert len(y.shape) == 2, 'Sinogram input must only be 2 dimensional'
-
-    x_rec: torch.Tensor = torch.ones(x_shape)
-    y_ones: torch.Tensor = torch.ones(y_shape)
+    x_rec: torch.Tensor = torch.ones(x_shape).to(y.device)  # Initialize the reconstruction with ones
+    y_ones: torch.Tensor = torch.ones(y_shape).to(y.device)  # Create a tensor of ones with the shape of the sinogram
     # Sensitivity image
     sens_image = dc.A_T(y_ones.unsqueeze(0).unsqueeze(0), op_name).squeeze(0).squeeze(0)
 
     for iter in range(iterations):
         fp = dc.A(x_rec.unsqueeze(0).unsqueeze(0), op_name).squeeze(0).squeeze(0) # Forward projection
-        ratio = y / (fp + 0.000001) # Ratio of measured to estimated (epsilon to prevent 0 div)
-        correction = dc.A_T(ratio.unsqueeze(0).unsqueeze(0), op_name).squeeze(0).squeeze(0)
+        # Normalise forward projection to [0, 1]
+        ratio = y / (fp + 1e-9) # Ratio of measured to estimated (epsilon to prevent 0 div)
+        correction = dc.A_T(ratio.unsqueeze(0).unsqueeze(0), op_name).squeeze(0).squeeze(0) / (sens_image + 1e-40)
         x_rec = x_rec * correction
 
     return x_rec
