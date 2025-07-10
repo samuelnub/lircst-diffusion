@@ -15,6 +15,47 @@ global_normalisation: bool = True  # Use global normalization for the dataset
 models_dir = '/home/samnub/dev/lircst-diffusion/models/'
 
 model_args = {
+    "ECD-CAT": {
+        "physics": False,
+        "latent": False,
+        "predict_mode": 'v',
+        "condition_A_T": True,
+        "degradation": 0.0,
+    },
+
+    "ECD": {  # The original ECD model without CAT
+        "physics": False,
+        "latent": False,
+        "predict_mode": 'v',
+        "condition_A_T": False,
+        "degradation": 0.0,
+    },
+    "ECD-Phys": {  # The original ECD model without CAT
+        "physics": True,
+        "latent": False,
+        "predict_mode": 'v',
+        "condition_A_T": False,
+        "degradation": 0.0,
+    },
+
+}
+
+model_args_unused = {
+    "ECD-CAT": {
+        "physics": False,
+        "latent": False,
+        "predict_mode": 'v',
+        "condition_A_T": True,
+        "degradation": 0.0,
+    },
+    "ECD-Phys-CAT": {
+        "physics": True,
+        "latent": False,
+        "predict_mode": 'v',
+        "condition_A_T": True,
+        "degradation": 0.0,
+    },
+
     "ECD-Phys-CAT-D20": {
         "physics": True,
         "latent": False,
@@ -29,27 +70,7 @@ model_args = {
         "condition_A_T": True,
         "degradation": 0.2,
     },
-    "ECD-Phys-CAT": {
-        "physics": True,
-        "latent": False,
-        "predict_mode": 'v',
-        "condition_A_T": True,
-        "degradation": 0.0,
-    },
-    "ECD-CAT": {
-        "physics": False,
-        "latent": False,
-        "predict_mode": 'v',
-        "condition_A_T": True,
-        "degradation": 0.0,
-    },
-    "ECD": {  # The original ECD model without CAT
-        "physics": False,
-        "latent": False,
-        "predict_mode": 'v',
-        "condition_A_T": False,
-        "degradation": 0.0,
-    },
+
 }
 
 
@@ -200,3 +221,28 @@ def to_decibels(value: float) -> float:
     if value <= 0:
         raise ValueError("Value must be positive to convert to decibels.")
     return 20 * torch.log10(value)
+
+
+from data_compute import DataCompute as DC
+def mlem(y: torch.Tensor,
+         op_name: str, # A or A_T operator name (e.g. 'ut')
+         dc: DC,
+         iterations: int = 20,
+         y_shape=(128,200),
+         x_shape=(128,128)) -> torch.Tensor:
+    # Perform Maximum Likelihood Expectation Maximization (MLEM) algorithm
+    # On our measured sinogram y.
+    assert len(y.shape) == 2, 'Sinogram input must only be 2 dimensional'
+
+    x_rec: torch.Tensor = torch.ones(x_shape)
+    y_ones: torch.Tensor = torch.ones(y_shape)
+    # Sensitivity image
+    sens_image = dc.A_T(y_ones.unsqueeze(0).unsqueeze(0), op_name).squeeze(0).squeeze(0)
+
+    for iter in range(iterations):
+        fp = dc.A(x_rec.unsqueeze(0).unsqueeze(0), op_name).squeeze(0).squeeze(0) # Forward projection
+        ratio = y / (fp + 0.000001) # Ratio of measured to estimated (epsilon to prevent 0 div)
+        correction = dc.A_T(ratio.unsqueeze(0).unsqueeze(0), op_name).squeeze(0).squeeze(0)
+        x_rec = x_rec * correction
+
+    return x_rec

@@ -82,6 +82,7 @@ class ECDiffusion(pl.LightningModule):
             'psnr': PSNR(data_range=1.0).cuda(),
             'ssim': SSIM(data_range=1.0).cuda(),  
             'mse': MSE().cuda(),
+            'mae': nn.L1Loss(reduction='none').cuda(), # For visualisation
         }
         
     def on_load_checkpoint(self, checkpoint):
@@ -94,6 +95,7 @@ class ECDiffusion(pl.LightningModule):
                    global_norm: bool=False, 
                    condition_perm: bool=True, 
                    condition_a_t: bool=None,
+                   return_precat: bool=False, # Whether to return the sinogram before we condition it with A_T P.S. returned before normalisation, so it will be in the original range
                    ):
         # Pre-process our phantom images and conditions (no need for a separate conditional encoder here)
 
@@ -108,6 +110,13 @@ class ECDiffusion(pl.LightningModule):
             1 if not self.latent else self.image_shape[-3], # 1 channel: sinogram (3 if latent)
             self.image_shape[-2], # height
             self.image_shape[-1], # width
+        )).cuda()
+
+        precat: torch.Tensor | None = None if not return_precat else torch.zeros((
+            condition.shape[0], # batch size
+            1 if not self.latent else self.image_shape[-3], # 1 channel: sinogram (3 if latent)
+            condition.shape[-3], # u
+            condition.shape[-2], # theta
         )).cuda()
 
         b: int = image.shape[0] if image is not None else condition.shape[0]
@@ -148,6 +157,10 @@ class ECDiffusion(pl.LightningModule):
                         wandb.log({'data/degradation_snr': snr,
                                    'data/degradation_psnr': psnr,})
 
+                if return_precat:
+                    # Return the pre-cat sinogram for later use
+                    precat[i] = sino.clone()
+
                 min_sino = DC.sino_ut_min if global_norm else torch.min(sino)
                 max_sino = DC.sino_ut_max if global_norm else torch.max(sino)
 
@@ -171,16 +184,21 @@ class ECDiffusion(pl.LightningModule):
             if condition_out is not None:
                 condition_out[i] = sino
 
+        if return_precat:
+            return image_out, condition_out, precat
+
         return image_out, condition_out
 
     @torch.no_grad()
     def forward(self, *args, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
         condition = args[0]
 
-        _, condition = self.preprocess(condition=condition, global_norm=global_normalisation)
+        _, condition, precat = self.preprocess(condition=condition, 
+                                       global_norm=global_normalisation,
+                                       return_precat=True)
         pred = self.model.diffusion_process(condition, *args[2:], **kwargs)  
 
-        return pred, condition
+        return pred, condition, precat
     
     def training_step(self, batch, batch_idx):
         image, condition, phantom_id = batch
@@ -212,14 +230,14 @@ class ECDiffusion(pl.LightningModule):
         if self.physics and self.physics_model is not None:
             # Apply physics model to the loss
             physics_loss: torch.Tensor | None = None
-            epoch_and_step: tuple | None = (self.current_epoch, self.global_step) if batch_idx == 0 else None
+            epoch_and_batch_idx: tuple = (self.current_epoch, batch_idx)
             if not self.latent:
-                physics_loss = self.physics_model(x_t, target_pred, t, image_raw, epoch_and_step=epoch_and_step)
+                physics_loss = self.physics_model(x_t, target_pred, t, image_raw, epoch_and_batch_idx=epoch_and_batch_idx)
             else:
                 decoded_target_pred: torch.Tensor | None = None
                 with torch.no_grad():
                     decoded_target_pred = self.model.diffusion_process.ae.decode(target_pred) / self.model.diffusion_process.latent_scale_factor
-                physics_loss = self.physics_model(x_t, decoded_target_pred, t, image_raw, epoch_and_step=epoch_and_step)
+                physics_loss = self.physics_model(x_t, decoded_target_pred, t, image_raw, epoch_and_batch_idx=epoch_and_batch_idx)
             loss += physics_loss
 
         self.log('train_loss', loss, prog_bar=True)
@@ -277,10 +295,14 @@ class ECDiffusion(pl.LightningModule):
 
         image, _ = self.preprocess(image=image, global_norm=global_normalisation) # Don't double-preprocess the condition
 
-        pred, encoded_condition = self.forward(condition)
+        pred, encoded_condition, precat = self.forward(condition)
 
         # Pre-process our prediction so that it's within [-1, 1] range
         # pred, _ = self.preprocess(image=pred, global_norm=False) # Don't double-preprocess the prediction
+
+        #pred = self.data_compute.A_T(condition.permute(0,3,1,2).sum(dim=-3,keepdim=True), 'ut')
+        
+        #pred = ((pred - DC.sino_ut_a_t_min) / (DC.sino_ut_a_t_max - DC.sino_ut_a_t_min)) * 2 - 1
 
         if pred.shape != image.shape:
             pred = F.interpolate(pred, size=image.shape[-1], mode='bilinear', align_corners=False)
@@ -295,26 +317,32 @@ class ECDiffusion(pl.LightningModule):
         psnr_scat: float = 0
         ssim_scat: float = 0
         rmse_scat: float = 0
+        mae_scat: torch.Tensor | None = None
 
         psnr_atten: float = 0
         ssim_atten: float = 0
         rmse_atten: float = 0
+        mae_atten: torch.Tensor | None = None
 
         psnr_scat = self.metrics['psnr'](pred[:, 0, :, :].unsqueeze(1), image[:, 0, :, :].unsqueeze(1))
         ssim_scat = self.metrics['ssim'](pred[:, 0, :, :].unsqueeze(1), image[:, 0, :, :].unsqueeze(1))
         rmse_scat = torch.sqrt(self.metrics['mse'](pred[:, 0, :, :].reshape(-1), image[:, 0, :, :].reshape(-1)))
+        mae_scat = self.metrics['mae'](pred[:, 0, :, :].unsqueeze(1), image[:, 0, :, :].unsqueeze(1))
 
         psnr_atten = self.metrics['psnr'](pred[:, -1, :, :].unsqueeze(1), image[:, -1, :, :].unsqueeze(1))
         ssim_atten = self.metrics['ssim'](pred[:, -1, :, :].unsqueeze(1), image[:, -1, :, :].unsqueeze(1))
         rmse_atten = torch.sqrt(self.metrics['mse'](pred[:, -1, :, :].reshape(-1), image[:, -1, :, :].reshape(-1)))
+        mae_atten = self.metrics['mae'](pred[:, -1, :, :].unsqueeze(1), image[:, -1, :, :].unsqueeze(1))
 
         self.log('psnr_scat', psnr_scat, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
         self.log('ssim_scat', ssim_scat, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
         self.log('rmse_scat', rmse_scat, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
+        self.log('mae_scat', mae_scat.mean(), prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
 
         self.log('psnr_atten', psnr_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
         self.log('ssim_atten', ssim_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
         self.log('rmse_atten', rmse_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
+        self.log('mae_atten', mae_atten.mean(), prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
 
         if wandb.run is not None:
             if not is_test:
@@ -322,48 +350,67 @@ class ECDiffusion(pl.LightningModule):
                     'val/psnr_scat': psnr_scat.item(),
                     'val/ssim_scat': ssim_scat.item(),
                     'val/rmse_scat': rmse_scat.item(),
+                    'val/mae_scat': mae_scat.mean().item(),
                     'val/psnr_atten': psnr_atten.item(),
                     'val/ssim_atten': ssim_atten.item(),
                     'val/rmse_atten': rmse_atten.item(),
+                    'val/mae_atten': mae_atten.mean().item(),
                 })
             if is_test:
                 wandb.log({
                     'test/psnr_scat': psnr_scat.item(),
                     'test/ssim_scat': ssim_scat.item(),
                     'test/rmse_scat': rmse_scat.item(),
+                    'test/mae_scat': mae_scat.mean().item(),
                     'test/psnr_atten': psnr_atten.item(),
                     'test/ssim_atten': ssim_atten.item(),
                     'test/rmse_atten': rmse_atten.item(),
+                    'test/mae_atten': mae_atten.mean().item(),
                 })
 
         if to_print:
             # Display the prediction and the ground truth for first item in batch
-            plt.figure(figsize=(12, 6))
-            plt.subplot(1, 5, 1)
+            plt.figure(figsize=(20, 6))
+            plt.subplot(1, 8, 1)
             plt.title(f'{phantom_id[0]}')
+            plt.imshow(precat[0, 0].detach().cpu().numpy(), cmap='gray')
+            plt.colorbar(orientation='horizontal')
+            plt.axis('off')
+            plt.subplot(1, 8, 2)
+            plt.title(f'Condition')
             plt.imshow(encoded_condition[0, 0].detach().cpu().numpy(), cmap='gray')
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
-            plt.subplot(1, 5, 2)
+            plt.subplot(1, 8, 3)
             plt.title(f'(PSNR:{psnr_scat.item():.3f}, SSIM:{ssim_scat.item():.3f}, RMSE:{rmse_scat.item():.3f})')
             plt.imshow(pred[0, 0].detach().cpu().numpy(), cmap='gray')
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
-            plt.subplot(1, 5, 3)
+            plt.subplot(1, 8, 4)
             plt.title(f'Scat')
             plt.imshow(image[0, 0].detach().cpu().numpy(), cmap='gray')
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
-            plt.subplot(1, 5, 4)
+            plt.subplot(1, 8, 5)
             plt.title(f'(PSNR:{psnr_atten.item():.3f}, SSIM:{ssim_atten.item():.3f}, RMSE:{rmse_atten.item():.3f})')
             plt.imshow(pred[0, -1].detach().cpu().numpy(), cmap='gray')
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
-            plt.subplot(1, 5, 5)
+            plt.subplot(1, 8, 6)
             plt.title(f'Atten')
             plt.imshow(image[0, -1].detach().cpu().numpy(), cmap='gray')
             plt.colorbar(orientation='horizontal')
             plt.axis('off')
+            plt.subplot(1, 8, 7)
+            plt.title(f'Scat MAE {mae_scat.mean().item():.3f}')
+            plt.imshow(mae_scat[0, 0].detach().cpu().numpy(), cmap='magma', vmin=0, vmax=0.2)
+            plt.colorbar(orientation='horizontal')
+            plt.axis('off')
+            plt.subplot(1, 8, 8)
+            plt.title(f'Atten MAE {mae_atten.mean().item():.3f}')
+            plt.imshow(mae_atten[0, 0].detach().cpu().numpy(), cmap='magma', vmin=0, vmax=0.2)
+            plt.colorbar(orientation='horizontal')
+            plt.axis('off') # TODO: absolute scale
             plt.tight_layout()
 
             fig = plt.gcf()

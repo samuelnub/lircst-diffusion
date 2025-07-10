@@ -26,12 +26,12 @@ class PhysicsIncorporated(nn.Module):
 
         self.stochastic_proportion: float = 1/4 # Only use 1/nth of the batch to compute loss
 
-        self.loss_metric = F.mse_loss
-
+        self.loss_metric = nn.L1Loss(reduction='none')  # Use L1 loss for the residuals
+        
         self.image_width = 128
 
 
-    def forward(self, x_t: torch.Tensor, target_pred: torch.Tensor, t, gt: torch.Tensor, epoch_and_step: tuple|None=None) -> torch.Tensor:
+    def forward(self, x_t: torch.Tensor, target_pred: torch.Tensor, t, gt: torch.Tensor, epoch_and_batch_idx: tuple|None=None) -> torch.Tensor:
         # Apply forward operator to our predicted x_0 based on x_t and noise_hat, and calculate loss between the predicted and actual y.
         # P.S. GT phantom must be raw values, not normalised to any range.
 
@@ -84,7 +84,7 @@ class PhysicsIncorporated(nn.Module):
                 if sino_gt_ut.shape[-2:] != sino_pred_ut.shape[-2:]:
                     sino_pred_ut = F.interpolate(sino_pred_ut, size=sino_gt_ut.shape[-2:], mode='bilinear', align_corners=False)
 
-                loss_ut = self.loss_metric(sino_pred_ut, sino_gt_ut)
+                loss_ut: torch.Tensor = self.loss_metric(sino_pred_ut, sino_gt_ut)
                 # Compute the gaussian log likelihood of loss_ut
                 # https://github.com/jhbastek/PhysicsInformedDiffusionModels/blob/main/src/denoising_toy_utils.py#L494
                 variance = extract(self.gfp.posterior_variance_clipped, t[i].unsqueeze(0), loss_ut.shape)
@@ -94,8 +94,16 @@ class PhysicsIncorporated(nn.Module):
 
                 loss_total += residual_ut * (1/x_t.shape[0]) # Scale by batch size
 
+                if epoch_and_batch_idx is not None and epoch_and_batch_idx[1] % 50 == 0:
+                    if wandb.run is not None:
+                        wandb.log({
+                            "phys/loss_ut_mean": loss_ut.mean().item(),
+                            "phys/loss_ut_log_likelihood": loss_ut_log_likelihood.mean().item(),
+                            "phys/residual_ut": residual_ut.item(),
+                        })
+
                 # debugging: plot predicted x_0 and sino_pred_ut and y
-                if epoch_and_step is not None and epoch_and_step[0] % 5 == 0 and i == indices[0]:  # Only plot for the first sample in the batch
+                if epoch_and_batch_idx is not None and epoch_and_batch_idx[0] % 5 == 0 and epoch_and_batch_idx[1] == 0 and i == indices[0]:  # Only plot for the first sample in the batch
 
                     plt.figure(figsize=(12, 6))
                     
@@ -112,13 +120,13 @@ class PhysicsIncorporated(nn.Module):
                     plt.axis('off')
 
                     plt.subplot(1, 4, 3)
-                    plt.title('Predicted Sinogram')
+                    plt.title('Predicted Sino')
                     plt.imshow(sino_pred_ut[0][0].detach().cpu().numpy(), cmap='gray')
                     plt.colorbar(orientation='horizontal')
                     plt.axis('off')
 
                     plt.subplot(1, 4, 4)
-                    plt.title(f'Sinogram from GT, loss:{loss_ut_log_likelihood.item():.4f}')
+                    plt.title(f'Sino of GT, loss:{loss_ut_log_likelihood.mean().item():.8f}')
                     plt.imshow(sino_gt_ut[0][0].detach().cpu().numpy(), cmap='gray')
                     plt.colorbar(orientation='horizontal')
                     plt.axis('off')

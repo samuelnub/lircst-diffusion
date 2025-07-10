@@ -5,6 +5,7 @@
 """
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from ..beta_schedules import *
 
@@ -31,6 +32,11 @@ class DDPM_Sampler(nn.Module):
         self.register_buffer('alphas_one_minus_cumprod_sqrt',(1-self.alphas_cumprod).sqrt())
         self.register_buffer('alphas_sqrt',self.alphas.sqrt())
         self.register_buffer('alphas_sqrt_recip',1/(self.alphas_sqrt))
+
+        # ADDED unused here, but if we want to switch between DDPM and DDIM, we need this
+        self.register_buffer('alphas_cumprod_prev', F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0))
+        self.register_buffer('alphas_cumprod_prev_sqrt', self.alphas_cumprod_prev.sqrt())
+
         
     @torch.no_grad()
     def forward(self,*args,**kwargs):   

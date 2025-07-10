@@ -7,6 +7,7 @@ from encoded_conditional_diffusion import ECDiffusion
 from util import generate_directory_name, get_latest_ckpt, model_args, get_dataset
 
 # Setup Diffusion modules
+import gc
 import torch
 import pytorch_lightning as pl
 from Diffusion.EMA import EMA
@@ -39,6 +40,7 @@ def train():
             "latent": model_arg["latent"],
             "predict_mode": model_arg["predict_mode"],
             "condition_A_T": model_arg["condition_A_T"],
+            "degradation": model_arg["degradation"],
             "timestamp": timestamp,
         }
         wandb_project = "lircst-diffusion"
@@ -57,7 +59,7 @@ def train():
 
             trainer = pl.Trainer(
                 #detect_anomaly=True, # Enable anomaly detection for debugging
-                max_epochs=200,
+                max_epochs=128, # Experiments seem to show that it converges around 100-120 epochs
                 max_steps=2e5,
                 callbacks=[EMA(0.9999)],
                 accelerator='gpu',
@@ -71,6 +73,12 @@ def train():
             
             if test_afterward:
                 trainer.test(model, ckpt_path=get_latest_ckpt(name)[0] if pre_load else None)
+
+        # Free up memory
+        print(f"Finished training {name}. Cleaning up...")
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
 
 if train_mode:
     train()
