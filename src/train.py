@@ -59,7 +59,8 @@ def train():
 
             trainer = pl.Trainer(
                 #detect_anomaly=True, # Enable anomaly detection for debugging
-                max_epochs=128, # Experiments seem to show that it converges around 100-120 epochs
+                max_epochs=1, # Experiments seem to show that it converges around 100-120 epochs
+                limit_train_batches=10, # TODO, as well as epoch max
                 max_steps=2e5,
                 callbacks=[EMA(0.9999)],
                 accelerator='gpu',

@@ -15,12 +15,13 @@ global_normalisation: bool = True  # Use global normalization for the dataset
 models_dir = '/home/samnub/dev/lircst-diffusion/models/'
 
 model_args = {
-    "ECD-CAT": {
+    "CAT": {
         "physics": False,
         "latent": False,
         "predict_mode": 'v',
         "condition_A_T": True,
         "degradation": 0.0,
+        "classical_evaluation": True,  # Use classical evaluation metrics
     },
 
     "ECD": {  # The original ECD model without CAT
@@ -30,13 +31,16 @@ model_args = {
         "condition_A_T": False,
         "degradation": 0.0,
     },
-    "ECD-Phys": {  # The original ECD model without CAT
-        "physics": True,
+
+    "ECD-CAT": {
+        "physics": False,
         "latent": False,
         "predict_mode": 'v',
-        "condition_A_T": False,
+        "condition_A_T": True,
         "degradation": 0.0,
     },
+
+
 
 }
 
@@ -71,6 +75,13 @@ model_args_unused = {
         "degradation": 0.2,
     },
 
+    "ECD-Phys": {  # The original ECD model without CAT
+        "physics": True,
+        "latent": False,
+        "predict_mode": 'v',
+        "condition_A_T": False,
+        "degradation": 0.0,
+    },
 }
 
 
@@ -86,6 +97,10 @@ def get_dataset():
     print(f"Test set size: {len(dataset_test)}")
 
     return dataset_train, dataset_valid, dataset_test
+
+def get_toy_dataset():
+    dataset = LircstAnaDataset('/home/samnub/dev/lircst-iterecon/lircst_data_unseen/')
+    return dataset
 
 
 def generate_directory_name(model_name, preexisting: str|None=None):

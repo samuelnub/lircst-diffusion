@@ -35,7 +35,8 @@ class ECDiffusion(pl.LightningModule):
                  latent=False,
                  predict_mode='v',
                  condition_A_T=True,
-                 degradation=0.0):
+                 degradation=0.0,
+                 classical_evaluation=False):
         super().__init__()
         self.train_dataset = train_dataset
         self.valid_dataset = valid_dataset
@@ -46,6 +47,7 @@ class ECDiffusion(pl.LightningModule):
         self.predict_mode = predict_mode  # 'eps' or 'x0' or 'v'
         self.condition_A_T = condition_A_T  # Whether to pass our condition (sinogram) through the physics model
         self.degradation = degradation  # Self sabotaging Degradation factor for the sinogram readings
+        self.classical_evaluation = classical_evaluation  # Whether to evaluate the model using classical methods (MLEM, backprojection)
 
         self.image_shape = (2, 128, 128) if not self.latent else (3, 256, 256)  # 2 channels: scatter and attenuation
 
@@ -295,26 +297,36 @@ class ECDiffusion(pl.LightningModule):
 
         image, _ = self.preprocess(image=image, global_norm=global_normalisation) # Don't double-preprocess the condition
 
+        is_classical: bool = self.classical_evaluation
 
-        pred, encoded_condition, precat = self.forward(condition) # Learned prediction is assumed to be in [-1, 1] range
+        pred: torch.Tensor | None = None
+        encoded_condition: torch.Tensor | None = None
+        precat: torch.Tensor | None = None
 
-        classical: bool = False
-        if classical:
+        if not is_classical:
+            pred, encoded_condition, precat = self.forward(condition) # Learned prediction is assumed to be in [-1, 1] range
+
+        if is_classical:
+            is_mlem: bool = False
+
             encoded_condition: torch.Tensor = torch.zeros((condition.shape[0], 1, *self.image_shape[-2:])).cuda() if not self.latent else torch.zeros((condition.shape[0], 3, *self.image_shape[-2:])).cuda()
             precat: torch.Tensor = torch.zeros((condition.shape[0], 1, condition.shape[-3], condition.shape[-2])).cuda() if not self.latent else torch.zeros((condition.shape[0], 3, condition.shape[-3], condition.shape[-2])).cuda()
-            pred: torch.Tensor = torch.zeros((condition.shape[0], *self.image_shape)).cuda()  # Initialize prediction tensor
-            for i in range(condition.shape[0]):
-                to_feed = condition[i].permute(2,0,1).sum(dim=-3,keepdim=False).cuda()
-                if self.degradation > 0:
-                    to_feed = sino_undersample(to_feed.unsqueeze(0).unsqueeze(0), self.degradation).squeeze(0).squeeze(0)
-                    to_feed = poisson_noise(to_feed.unsqueeze(0).unsqueeze(0), noise_factor=self.degradation, scale=10000/DC.sino_ut_mean).squeeze(0).squeeze(0)
-                    to_feed = gaussian_noise(to_feed.unsqueeze(0).unsqueeze(0), noise_factor=self.degradation, scale=DC.sino_ut_std).squeeze(0).squeeze(0)
-                precat[i] = to_feed.unsqueeze(0).clone()
-                pred[i] = mlem(to_feed, 'ut', self.data_compute,)
-
-            # pred = self.data_compute.A_T(condition.permute(0,3,1,2).sum(dim=-3,keepdim=True), 'ut')
-            pred = ((pred - DC.phan0_min) / (DC.phan0_max - DC.phan0_min)) * 2 - 1
-
+            if is_mlem:
+                pred: torch.Tensor = torch.zeros((condition.shape[0], *self.image_shape)).cuda()  # Initialize prediction tensor
+                for i in range(condition.shape[0]):
+                    to_feed = condition[i].permute(2,0,1).sum(dim=-3,keepdim=False).cuda()
+                    if self.degradation > 0:
+                        to_feed = sino_undersample(to_feed.unsqueeze(0).unsqueeze(0), self.degradation).squeeze(0).squeeze(0)
+                        to_feed = poisson_noise(to_feed.unsqueeze(0).unsqueeze(0), noise_factor=self.degradation, scale=10000/DC.sino_ut_mean).squeeze(0).squeeze(0)
+                        to_feed = gaussian_noise(to_feed.unsqueeze(0).unsqueeze(0), noise_factor=self.degradation, scale=DC.sino_ut_std).squeeze(0).squeeze(0)
+                    precat[i] = to_feed.unsqueeze(0).clone()
+                    pred[i] = mlem(to_feed, 'ut', self.data_compute,)
+                pred = ((pred - DC.phan0_min) / (DC.phan0_max - DC.phan0_min)) * 2 - 1
+            else:
+                # Classical prediction using backprojection
+                pred = self.data_compute.A_T(condition.permute(0,3,1,2).sum(dim=-3,keepdim=True), 'ut')  # Apply the pseudoinverse physics model to the sinogram
+                # Normalise to [-1, 1] range
+                pred = ((pred - DC.sino_ut_a_t_min) / (DC.sino_ut_a_t_max - DC.sino_ut_a_t_min)) * 2 - 1
 
         if pred.shape != image.shape:
             pred = F.interpolate(pred, size=image.shape[-1], mode='bilinear', align_corners=False)
@@ -371,12 +383,35 @@ class ECDiffusion(pl.LightningModule):
                 })
 
         if to_print:
+            # Just for the sake of it, let's plot a heatmap of Mean Absolute Error (MAE) between predicted and GT sinograms
+            mae_sino = torch.abs(pred - image).mean(dim=(0, 1))
+            plt.figure(figsize=(6, 6))
+            plt.title('Mean Absolute Error (MAE) of Prediction')
+            plt.imshow(mae_sino.detach().cpu().numpy(), cmap='magma', interpolation='nearest')
+            plt.colorbar(orientation='horizontal')
+            plt.axis('off')
+            plt.tight_layout()
+            fig_mae = plt.gcf()
+            if wandb.run is not None:
+                wandb.log({"phys/mae_sino_fig": fig_mae})
+            else:
+                display(fig_mae)
+            plt.close()
+
+
+            if global_normalisation:
+                # Rescale the [0, 1] images back to their real-world values
+                image[0, 0, :, :] = image[0, 0, :, :] * (DC.phan0_max - DC.phan0_min) + DC.phan0_min
+                image[0, -1, :, :] = image[0, -1, :, :] * (DC.phan1_max - DC.phan1_min) + DC.phan1_min
+                pred[0, 0, :, :] = pred[0, 0, :, :] * (DC.phan0_max - DC.phan0_min) + DC.phan0_min
+                pred[0, -1, :, :] = pred[0, -1, :, :] * (DC.phan1_max - DC.phan1_min) + DC.phan1_min
+
             # Display the prediction and the ground truth for first item in batch
-            plt.figure(figsize=(20, 6))
+            plt.figure(figsize=(20, 6), dpi=200)
             plt.subplot(1, 6, 1)
             plt.title(f'{phantom_id[0]}')
             plt.imshow(precat[0, 0].detach().cpu().numpy(), cmap='gray')
-            plt.colorbar(orientation='horizontal')
+            plt.colorbar(orientation='horizontal').ax.set_title('Intensity')
             plt.axis('off')
             plt.subplot(1, 6, 2)
             plt.title(f'Condition')
@@ -386,22 +421,22 @@ class ECDiffusion(pl.LightningModule):
             plt.subplot(1, 6, 3)
             plt.title(f'(PSNR:{psnr_scat.item():.3f}, SSIM:{ssim_scat.item():.3f}, RMSE:{rmse_scat.item():.3f})')
             plt.imshow(pred[0, 0].detach().cpu().numpy(), cmap='gray')
-            plt.colorbar(orientation='horizontal')
+            plt.colorbar(orientation='horizontal').ax.set_title('ρₑ (e/cm³)' if global_normalisation else '')
             plt.axis('off')
             plt.subplot(1, 6, 4)
             plt.title(f'Scat')
             plt.imshow(image[0, 0].detach().cpu().numpy(), cmap='gray')
-            plt.colorbar(orientation='horizontal')
+            plt.colorbar(orientation='horizontal').ax.set_title('ρₑ (e/cm³)' if global_normalisation else '')
             plt.axis('off')
             plt.subplot(1, 6, 5)
             plt.title(f'(PSNR:{psnr_atten.item():.3f}, SSIM:{ssim_atten.item():.3f}, RMSE:{rmse_atten.item():.3f})')
             plt.imshow(pred[0, -1].detach().cpu().numpy(), cmap='gray')
-            plt.colorbar(orientation='horizontal')
+            plt.colorbar(orientation='horizontal').ax.set_title('μ/ρ (cm²/g)' if global_normalisation else '')
             plt.axis('off')
             plt.subplot(1, 6, 6)
             plt.title(f'Atten')
             plt.imshow(image[0, -1].detach().cpu().numpy(), cmap='gray')
-            plt.colorbar(orientation='horizontal')
+            plt.colorbar(orientation='horizontal').ax.set_title('μ/ρ (cm²/g)' if global_normalisation else '')
             plt.axis('off')
             plt.tight_layout()
 
