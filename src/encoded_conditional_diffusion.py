@@ -383,22 +383,6 @@ class ECDiffusion(pl.LightningModule):
                 })
 
         if to_print:
-            # Just for the sake of it, let's plot a heatmap of Mean Absolute Error (MAE) between predicted and GT sinograms
-            mae_sino = torch.abs(pred - image).mean(dim=(0, 1))
-            plt.figure(figsize=(6, 6))
-            plt.title('Mean Absolute Error (MAE) of Prediction')
-            plt.imshow(mae_sino.detach().cpu().numpy(), cmap='magma', interpolation='nearest')
-            plt.colorbar(orientation='horizontal')
-            plt.axis('off')
-            plt.tight_layout()
-            fig_mae = plt.gcf()
-            if wandb.run is not None:
-                wandb.log({"phys/mae_sino_fig": fig_mae})
-            else:
-                display(fig_mae)
-            plt.close()
-
-
             if global_normalisation:
                 # Rescale the [0, 1] images back to their real-world values
                 image[0, 0, :, :] = image[0, 0, :, :] * (DC.phan0_max - DC.phan0_min) + DC.phan0_min
