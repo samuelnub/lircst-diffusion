@@ -379,7 +379,7 @@ class ECDiffusion(pl.LightningModule):
 
         if wandb.run is not None:
             for i in range(len(psnr_scat)):
-                commit = i >= len(psnr_scat) - 1  # Only commit the last item in the batch to the cloud
+                commit = True  # i >= len(psnr_scat) - 1  # Only commit the last item in the batch to the cloud
                 if not is_test:
                     wandb.log({
                         'val/psnr_scat': psnr_scat[i],

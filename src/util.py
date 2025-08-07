@@ -21,7 +21,7 @@ model_args = {
         "latent": False,
         "predict_mode": 'v',
         "condition_A_T": False,
-        "degradation": 0.0,
+        "degradation": 0.9,
         "classical_evaluation": False, # TODO
     },
 
