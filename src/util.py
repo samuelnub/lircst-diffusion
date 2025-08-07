@@ -6,6 +6,7 @@ import torch
 from torch.utils.data import *
 from lircst_ana_dataset import LircstAnaDataset
 from torch import Generator
+from torchmetrics.image import PeakSignalNoiseRatio as PSNR
 
 
 beta_scheduler = 'cosine'
@@ -15,6 +16,30 @@ global_normalisation: bool = True  # Use global normalization for the dataset
 models_dir = '/home/samnub/dev/lircst-diffusion/models/'
 
 model_args = {
+    "ECD": {  # The original ECD model without CAT
+        "physics": False,
+        "latent": False,
+        "predict_mode": 'v',
+        "condition_A_T": False,
+        "degradation": 0.0,
+        "classical_evaluation": False, # TODO
+    },
+
+}
+
+'''
+"ECD": {  # The original ECD model without CAT
+    "physics": False,
+    "latent": False,
+    "predict_mode": 'v',
+    "condition_A_T": False,
+    "degradation": 0.9,
+    "classical_evaluation": False,
+},
+'''
+
+
+model_args_unused = {
     "CAT": {
         "physics": False,
         "latent": False,
@@ -24,27 +49,6 @@ model_args = {
         "classical_evaluation": True,  # Use classical evaluation metrics
     },
 
-    "ECD": {  # The original ECD model without CAT
-        "physics": False,
-        "latent": False,
-        "predict_mode": 'v',
-        "condition_A_T": False,
-        "degradation": 0.0,
-    },
-
-    "ECD-CAT": {
-        "physics": False,
-        "latent": False,
-        "predict_mode": 'v',
-        "condition_A_T": True,
-        "degradation": 0.0,
-    },
-
-
-
-}
-
-model_args_unused = {
     "ECD-CAT": {
         "physics": False,
         "latent": False,
@@ -200,6 +204,30 @@ def sino_undersample(y: torch.Tensor, mask_proportion: float=0.2) -> torch.Tenso
     return y * mask  # Element-wise multiplication to apply the mask
 
 
+def degrade_sino(sino: torch.Tensor, degradation: float, calc_snr: bool=False) -> torch.Tensor | tuple[torch.Tensor, tuple]:
+    """
+    Degrade the sinogram by applying Poisson noise and undersampling.
+    """
+    
+    sino_og: torch.Tensor|None = sino.clone() if calc_snr else None # Keep the original sinogram for noise calculations
+    snr: float|None = None  # SNR in dB, if calculated
+
+    # Apply Poisson noise
+    sino_noisy = poisson_noise(sino, noise_factor=1-degradation, scale=(1-degradation)*1000/(degradation*DC.sino_ut_mean))
+
+    # Undersample the sinogram
+    #sino_noisy = sino_undersample(sino_noisy, mask_proportion=degradation) # TODO not applied currently
+
+    # Apply Gaussian noise
+    #sino_noisy = gaussian_noise(sino_noisy, noise_factor=degradation, scale=DC.sino_ut_std)
+
+    if calc_snr:
+        # Calculate SNR in dB
+        snr = snr_db(sino_og, sino_noisy)
+
+    return sino_noisy if not calc_snr else (sino_noisy, snr)
+
+
 def gaussian_log_likelihood(x: torch.Tensor, mean: torch.Tensor, var: torch.Tensor, return_full: bool=False) -> torch.Tensor:
     # https://github.com/jhbastek/PhysicsInformedDiffusionModels/blob/main/src/denoising_toy_utils.py#L372
     centered_x = x - mean
@@ -242,7 +270,7 @@ from data_compute import DataCompute as DC
 def mlem(y: torch.Tensor,
          op_name: str, # A or A_T operator name (e.g. 'ut')
          dc: DC,
-         iterations: int = 20,
+         iterations: int = 1,
          y_shape=(128,200),
          x_shape=(128,128)) -> torch.Tensor:
     # Perform Maximum Likelihood Expectation Maximization (MLEM) algorithm

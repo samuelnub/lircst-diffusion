@@ -15,7 +15,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 
 pre_load: bool = True # Load the latest checkpoint if available
-train_mode: bool = True
+train_mode: bool = False
 test_afterward: bool = True
 
 dataset_train, dataset_val, dataset_test = get_dataset()
@@ -70,7 +70,8 @@ def train():
                 default_root_dir=default_root_dir,
             )
             
-            trainer.fit(model, ckpt_path=get_latest_ckpt(name)[0] if pre_load else None)
+            if train_mode:
+                trainer.fit(model, ckpt_path=get_latest_ckpt(name)[0] if pre_load else None)
             
             if test_afterward:
                 trainer.test(model, ckpt_path=get_latest_ckpt(name)[0] if pre_load else None)
@@ -81,5 +82,4 @@ def train():
         gc.collect()
         torch.cuda.empty_cache()
 
-if train_mode:
-    train()
+train()

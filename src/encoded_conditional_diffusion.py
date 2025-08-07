@@ -11,13 +11,14 @@ import numpy as np
 from sampler_wrapper import SamplerWrapper
 from physics_inc import PhysicsIncorporated
 from data_compute import DataCompute as DC
-from util import sino_undersample, poisson_noise, gaussian_noise, snr_db, to_decibels, global_normalisation, mlem
+from util import sino_undersample, poisson_noise, gaussian_noise, snr_db, to_decibels, global_normalisation, mlem, degrade_sino
 
 from torchmetrics.image import PeakSignalNoiseRatio as PSNR
 from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
 from torchmetrics import MeanSquaredError as MSE
 
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 from IPython.display import display, clear_output
 
 import wandb
@@ -148,16 +149,12 @@ class ECDiffusion(pl.LightningModule):
 
                 # Degradation is applied to the sinogram readings
                 if self.degradation > 0:
-                    sino_og = sino.clone() if (wandb.run is not None and wandb.run.step % 10 == 0) else None # Keep the original sinogram for noise calculations
-                    sino = sino_undersample(sino.unsqueeze(0), self.degradation).squeeze(0)  # Apply degradation to the sinogram readings
-                    sino = poisson_noise(sino.unsqueeze(0), noise_factor=self.degradation, scale=10000/DC.sino_ut_mean).squeeze(0)  # Add Poisson noise to the sinogram readings
-                    sino = gaussian_noise(sino.unsqueeze(0), noise_factor=self.degradation, scale=DC.sino_ut_std).squeeze(0)  # Add Gaussian noise to the sinogram readings
+                    sino, snr = degrade_sino(sino.unsqueeze(0), degradation=self.degradation, calc_snr=True)
+                    sino = sino.squeeze(0)  # Remove batch dimension
                     if wandb.run is not None and wandb.run.step % 10 == 0:
-                        # Calculate SNR in dB
-                        snr = snr_db(sino_og, sino)
-                        psnr = PSNR().cuda()(sino_og.unsqueeze(0), sino.unsqueeze(0)).item()
-                        wandb.log({'data/degradation_snr': snr,
-                                   'data/degradation_psnr': psnr,})
+                        wandb.log({'data/degradation_snr': snr,})
+                    elif wandb.run is None:
+                        print(f"Degradation - SNR: {snr:.2f} dB")
 
                 if return_precat:
                     # Return the pre-cat sinogram for later use
@@ -307,7 +304,7 @@ class ECDiffusion(pl.LightningModule):
             pred, encoded_condition, precat = self.forward(condition) # Learned prediction is assumed to be in [-1, 1] range
 
         if is_classical:
-            is_mlem: bool = False
+            is_mlem: bool = True
 
             encoded_condition: torch.Tensor = torch.zeros((condition.shape[0], 1, *self.image_shape[-2:])).cuda() if not self.latent else torch.zeros((condition.shape[0], 3, *self.image_shape[-2:])).cuda()
             precat: torch.Tensor = torch.zeros((condition.shape[0], 1, condition.shape[-3], condition.shape[-2])).cuda() if not self.latent else torch.zeros((condition.shape[0], 3, condition.shape[-3], condition.shape[-2])).cuda()
@@ -316,9 +313,12 @@ class ECDiffusion(pl.LightningModule):
                 for i in range(condition.shape[0]):
                     to_feed = condition[i].permute(2,0,1).sum(dim=-3,keepdim=False).cuda()
                     if self.degradation > 0:
-                        to_feed = sino_undersample(to_feed.unsqueeze(0).unsqueeze(0), self.degradation).squeeze(0).squeeze(0)
-                        to_feed = poisson_noise(to_feed.unsqueeze(0).unsqueeze(0), noise_factor=self.degradation, scale=10000/DC.sino_ut_mean).squeeze(0).squeeze(0)
-                        to_feed = gaussian_noise(to_feed.unsqueeze(0).unsqueeze(0), noise_factor=self.degradation, scale=DC.sino_ut_std).squeeze(0).squeeze(0)
+                        to_feed, snr = degrade_sino(to_feed.unsqueeze(0).unsqueeze(0), degradation=self.degradation, calc_snr=True)
+                        to_feed = to_feed.squeeze(0).squeeze(0)  # Remove batch and channel dimensions
+                        if wandb.run is not None:
+                            wandb.log({'data/degradation_snr': snr,})
+                        elif wandb.run is None:
+                            print(f"Degradation - SNR: {snr:.2f} dB")
                     precat[i] = to_feed.unsqueeze(0).clone()
                     pred[i] = mlem(to_feed, 'ut', self.data_compute,)
                 pred = ((pred - DC.phan0_min) / (DC.phan0_max - DC.phan0_min)) * 2 - 1
@@ -338,49 +338,66 @@ class ECDiffusion(pl.LightningModule):
         
         image = ((image + 1) / 2)
 
-        psnr_scat: float = 0
-        ssim_scat: float = 0
-        rmse_scat: float = 0
+        metrics_per_sample: bool = True # Whether to compute metrics per sample or average over the batch
 
-        psnr_atten: float = 0
-        ssim_atten: float = 0
-        rmse_atten: float = 0
+        psnr_scat: list[float] = []
+        ssim_scat: list[float] = []
+        rmse_scat: list[float] = []
 
-        psnr_scat = self.metrics['psnr'](pred[:, 0, :, :].unsqueeze(1), image[:, 0, :, :].unsqueeze(1))
-        ssim_scat = self.metrics['ssim'](pred[:, 0, :, :].unsqueeze(1), image[:, 0, :, :].unsqueeze(1))
-        rmse_scat = torch.sqrt(self.metrics['mse'](pred[:, 0, :, :].reshape(-1), image[:, 0, :, :].reshape(-1)))
+        psnr_atten: list[float] = []
+        ssim_atten: list[float] = []
+        rmse_atten: list[float] = []
 
-        psnr_atten = self.metrics['psnr'](pred[:, -1, :, :].unsqueeze(1), image[:, -1, :, :].unsqueeze(1))
-        ssim_atten = self.metrics['ssim'](pred[:, -1, :, :].unsqueeze(1), image[:, -1, :, :].unsqueeze(1))
-        rmse_atten = torch.sqrt(self.metrics['mse'](pred[:, -1, :, :].reshape(-1), image[:, -1, :, :].reshape(-1)))
+        def compute_metrics(pred: torch.Tensor, image: torch.Tensor) -> tuple[float|list[float], float|list[float], float|list[float]]:
+            # expects a BCHW tensor
+            psnr = self.metrics['psnr'](pred, image)
+            ssim = self.metrics['ssim'](pred, image)
+            rmse = torch.sqrt(self.metrics['mse'](pred.reshape(-1), image.reshape(-1)))
+            return psnr.item(), ssim.item(), rmse.item()
+        
+        if not metrics_per_sample:
+            psnr_s, ssim_s, rmse_s = compute_metrics(pred[:, 0, :, :].unsqueeze(0), image[:, 0, :, :].unsqueeze(0))
+            psnr_scat.append(psnr_s)
+            ssim_scat.append(ssim_s)
+            rmse_scat.append(rmse_s)            
 
-        self.log('psnr_scat', psnr_scat, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
-        self.log('ssim_scat', ssim_scat, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
-        self.log('rmse_scat', rmse_scat, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
+            psnr_a, ssim_a, rmse_a = compute_metrics(pred[:, -1, :, :].unsqueeze(0), image[:, -1, :, :].unsqueeze(0))
+            psnr_atten.append(psnr_a)
+            ssim_atten.append(ssim_a)
+            rmse_atten.append(rmse_a)
+        else:
+            for i in range(pred.shape[0]):
+                psnr_s, ssim_s, rmse_s = compute_metrics(pred[i, 0, :, :].unsqueeze(0).unsqueeze(0), image[i, 0, :, :].unsqueeze(0).unsqueeze(0))
+                psnr_scat.append(psnr_s)
+                ssim_scat.append(ssim_s)
+                rmse_scat.append(rmse_s)
 
-        self.log('psnr_atten', psnr_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
-        self.log('ssim_atten', ssim_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
-        self.log('rmse_atten', rmse_atten, prog_bar=True, on_step=False, on_epoch=True, batch_size=self.batch_size)
+                psnr_a, ssim_a, rmse_a = compute_metrics(pred[i, -1, :, :].unsqueeze(0).unsqueeze(0), image[i, -1, :, :].unsqueeze(0).unsqueeze(0))
+                psnr_atten.append(psnr_a)
+                ssim_atten.append(ssim_a)
+                rmse_atten.append(rmse_a)
 
         if wandb.run is not None:
-            if not is_test:
-                wandb.log({
-                    'val/psnr_scat': psnr_scat.item(),
-                    'val/ssim_scat': ssim_scat.item(),
-                    'val/rmse_scat': rmse_scat.item(),
-                    'val/psnr_atten': psnr_atten.item(),
-                    'val/ssim_atten': ssim_atten.item(),
-                    'val/rmse_atten': rmse_atten.item(),
-                })
-            if is_test:
-                wandb.log({
-                    'test/psnr_scat': psnr_scat.item(),
-                    'test/ssim_scat': ssim_scat.item(),
-                    'test/rmse_scat': rmse_scat.item(),
-                    'test/psnr_atten': psnr_atten.item(),
-                    'test/ssim_atten': ssim_atten.item(),
-                    'test/rmse_atten': rmse_atten.item(),
-                })
+            for i in range(len(psnr_scat)):
+                commit = i >= len(psnr_scat) - 1  # Only commit the last item in the batch to the cloud
+                if not is_test:
+                    wandb.log({
+                        'val/psnr_scat': psnr_scat[i],
+                        'val/ssim_scat': ssim_scat[i],
+                        'val/rmse_scat': rmse_scat[i],
+                        #'val/psnr_atten': psnr_atten[i],
+                        #'val/ssim_atten': ssim_atten[i],
+                        #'val/rmse_atten': rmse_atten[i],
+                    }, commit=commit)
+                if is_test:
+                    wandb.log({
+                        'test/psnr_scat': psnr_scat[i],
+                        'test/ssim_scat': ssim_scat[i],
+                        'test/rmse_scat': rmse_scat[i],
+                        #'test/psnr_atten': psnr_atten[i],
+                        #'test/ssim_atten': ssim_atten[i],
+                        #'test/rmse_atten': rmse_atten[i],
+                    }, commit=commit)
 
         if to_print:
             if global_normalisation:
@@ -390,6 +407,44 @@ class ECDiffusion(pl.LightningModule):
                 pred[0, 0, :, :] = pred[0, 0, :, :] * (DC.phan0_max - DC.phan0_min) + DC.phan0_min
                 pred[0, -1, :, :] = pred[0, -1, :, :] * (DC.phan1_max - DC.phan1_min) + DC.phan1_min
 
+            # Display the results *aesthetically*
+            # 2 x 2 plot, we will plot:
+            #  the GT phantom scatter channel,
+            #  the original sinogram,
+            #  the Predicted scatter channel,
+            #  the error map between the predicted and GT phantom scatter channel
+
+            plt.figure(figsize=(10, 10), dpi=200)
+            plt.subplot(2, 2, 1)
+            plt.title(f'Ground Truth')
+            plt.imshow(image[0, 0].detach().cpu().numpy(), cmap='bone')
+            plt.colorbar(orientation='vertical', fraction=0.046, pad=0.04).ax.set_title('ρₑ (e/cm³)' if global_normalisation else '')
+            plt.xlabel('mm')
+            plt.ylabel('mm')
+            plt.subplot(2, 2, 2)
+            plt.title(f'Detector Reading')
+            plt.imshow(precat[0, 0].detach().cpu().numpy(), cmap='afmhot')
+            cb = plt.colorbar(orientation='horizontal').ax.set_title('Intensity', y=-2.8)
+            cb.axes.locator_params(nbins=5)
+            plt.gca().set_xticks(np.linspace(0, 200, 5))
+            plt.gca().set_xticklabels([0, 45, 90, 135, 180])
+            plt.xlabel('θ (degrees)')
+            plt.ylabel('Receiver')
+            plt.subplot(2, 2, 3)
+            plt.title(f'Predicted')
+            plt.imshow(pred[0, 0].detach().cpu().numpy(), cmap='bone')
+            plt.colorbar(orientation='vertical', fraction=0.046, pad=0.04).ax.set_title('ρₑ (e/cm³)' if global_normalisation else '')
+            plt.xlabel('mm')
+            plt.ylabel('mm')
+            plt.subplot(2, 2, 4)
+            plt.title(f'x̂-x')
+            plt.imshow((pred[0, 0] - image[0, 0]).detach().cpu().numpy(), cmap='seismic')
+            plt.colorbar(orientation='vertical', fraction=0.046, pad=0.04).ax.set_title('Error (e/cm³)' if global_normalisation else '')
+            plt.xlabel('mm')
+            plt.ylabel('mm')
+            plt.tight_layout()
+
+            '''
             # Display the prediction and the ground truth for first item in batch
             plt.figure(figsize=(20, 6), dpi=200)
             plt.subplot(1, 6, 1)
@@ -423,6 +478,7 @@ class ECDiffusion(pl.LightningModule):
             plt.colorbar(orientation='horizontal').ax.set_title('μ/ρ (cm²/g)' if global_normalisation else '')
             plt.axis('off')
             plt.tight_layout()
+            '''
 
             fig = plt.gcf()
 
@@ -432,6 +488,7 @@ class ECDiffusion(pl.LightningModule):
                 })
             else:
                 display(fig)
+                print(f'(PSNR:{psnr_scat}, SSIM:{ssim_scat}, RMSE:{rmse_scat})')
 
             plt.close()
 
